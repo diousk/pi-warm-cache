@@ -5352,4 +5352,50 @@ function deepEqualExcept<Actual, Expected>(
   }
 }
 
+// All-tools is explicit opt-in and only bypasses the name/command allowlist.
+{
+  assert(!DEFAULT_CONFIG.warmAllTools, "all-tools must default off");
+  const config = parseConfigJson('{"enabled":false,"warmAllTools":true}');
+  assert(parseConfigArgs("on", config).warmAllTools, "on must preserve all-tools JSON policy");
+  assert(!parseConfigArgs("off", config).enabled && parseConfigArgs("off", config).warmAllTools,
+    "off must preserve all-tools policy");
+  assert(parseConfigArgs("tools=all").warmAllTools, "tools=all must opt in");
+  assert(!parseConfigArgs("tools=off", config).warmAllTools, "tools=off must disable all-tools");
+  assert(!parseConfigArgs("tools=gradle", config).warmAllTools, "Gradle selection must exit all-tools mode");
+  let rejected = false;
+  try { parseConfigJson('{"warmAllTools":"true"}'); } catch { rejected = true; }
+  assert(rejected, "all-tools must be a JSON boolean");
+  const ctx = contextFixture({
+    cwd: process.cwd(), hasUI: false, isIdle: () => false,
+    model: modelFixture({id: "gpt-5.6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1"}),
+    thinkingLevel: "off", sessionManager: {getSessionId: () => "all-tools"},
+    ui: {setStatus() {}, setWidget() {}, theme: {fg: (_: string, s: string) => s}},
+  });
+  let calls = 0;
+  const warmer = new SessionWarmer(extensionApiFixture({getThinkingLevel: () => "off"}), completeFixture(async () => {
+    calls++;
+    return {stopReason: "stop", usage: {input: 0, output: 1, cacheRead: 100, cacheWrite: 0}};
+  }));
+  warmer.bindContext(ctx);
+  warmer.setConfig({...DEFAULT_CONFIG, warmAllTools: true, minCachedTokens: 10, toolWarmMinRuntimeMs: 0, toolWarmMaxProbes: 1});
+  const payload = {model: "gpt-5.6", input: [{role: "user", content: "work"}], prompt_cache_key: "all-tools"};
+  warmer.onProviderRequestStart(payload, ctx);
+  warmer.noteAssistantUsage(ctx, {cacheRead: 100});
+  const generating = await runTimerWarm(warmer);
+  assert(!generating.ok && calls === 0, "all-tools cannot warm during generation without tools");
+  warmer.onAssistantMessageEnd(ctx);
+  warmer.onToolExecutionStart({toolCallId: "browser", toolName: "browser", args: {}}, ctx);
+  warmer.onToolExecutionStart({toolCallId: "shell", toolName: "bash", args: {command: "npm test | tee log"}}, ctx);
+  assert((await runTimerWarm(warmer)).ok, "all-tools must allow mixed parallel tools and arbitrary commands");
+  assert(Number(calls) === 1 && warmer.getStatusText().includes("toolWarm=all"), "all-tools must be visible in status");
+  assert(!(await runTimerWarm(warmer)).ok && Number(calls) === 1, "all-tools must enforce probe cap");
+  warmer.setConfig({...warmer.getConfig(), toolWarmMaxProbes: 4, warmAllTools: false});
+  assert(!(await runTimerWarm(warmer)).ok, "disabling all-tools must block running unallowlisted tools");
+  warmer.setConfig({...warmer.getConfig(), warmAllTools: true});
+  warmer.onProviderRequestStart({...payload, prompt_cache_key: "new-anchor"}, ctx);
+  warmer.onAssistantMessageEnd(ctx);
+  assert(!(await runTimerWarm(warmer)).ok && Number(calls) === 1, "all-tools must retain revision fencing");
+  warmer.dispose();
+}
+
 console.log("provider.test.ts: all assertions passed");

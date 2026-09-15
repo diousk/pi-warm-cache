@@ -143,8 +143,24 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
 | `log` / `nolog` | Local JSONL log | off |
 | `tools=` | Allowlisted long-tool presets; currently `gradle`, or `off` | off |
+| `tools=all` | Opt into all tool names and commands (`warmAllTools: true` in JSON) | off |
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
+
+To opt into **all tools**, add `"warmAllTools": true` to the JSON file.
+This overrides the `warmDuringTools` allowlist, including for parallel tools.
+Use `/warm on` and `/warm off` as usual; the policy is preserved.
+For a runtime-only override use `/warm tools=all`; `/warm tools=gradle`
+returns to Gradle-only and `/warm tools=off` disables tool warming but leaves
+idle warming enabled if the master switch is on. All-tools mode does not
+itself enable the master switch.
+
+The minimum runtime, probe count, idle cutoff, spend/route gates and payload
+revision fencing still apply. Tools must actually be executing; model
+generation alone is not eligible. This mode also includes browser, custom
+tools and subagents, which may themselves make network/model requests that
+the parent extension cannot observe. Enable it only if that wider scope is
+acceptable. The extension never executes tool calls returned by a warm probe.
 
 The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
 command with plain arguments, optionally prefixed by `cd android &&` (or

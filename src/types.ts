@@ -142,6 +142,8 @@ export interface WarmCacheConfig {
   allowCodexAutoWarm: boolean;
   /** Opt-in command presets allowed to warm while a tool is still executing. */
   warmDuringTools: ToolWarmPreset[];
+  /** Opt in to every tool name/command; lifecycle and spend gates still apply. */
+  warmAllTools: boolean;
   /** Minimum matching-tool runtime before the first in-tool probe. */
   toolWarmMinRuntimeMs: number;
   /** Maximum provider probes during one uninterrupted matching-tool batch. */
@@ -164,6 +166,7 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   logToFile: false,
   allowCodexAutoWarm: true,
   warmDuringTools: [],
+  warmAllTools: false,
   toolWarmMinRuntimeMs: 180_000,
   toolWarmMaxProbes: 6,
 };

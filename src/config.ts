@@ -14,7 +14,7 @@ export function parseConfigJson(text: string): WarmCacheConfig {
     throw new Error("configuration must be a JSON object");
   }
   const next = { ...DEFAULT_CONFIG, warmDuringTools: [...DEFAULT_CONFIG.warmDuringTools] };
-  const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm"]);
+  const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm", "warmAllTools"]);
   const positive = new Set(["maxConcurrentWarmSessions", "maxConsecutiveFailures", "maxOutputTokens", "toolWarmMaxProbes"]);
   const nonnegative = new Set(["minCachedTokens", "toolWarmMinRuntimeMs"]);
   for (const [key, value] of Object.entries(parsed)) {
@@ -147,7 +147,11 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
       const requested = value.toLowerCase().split(",").map((item) => item.trim()).filter(Boolean);
       if (requested.some((item) => item === "off" || item === "none")) {
         next.warmDuringTools = [];
+        next.warmAllTools = false;
+      } else if (requested.length === 1 && requested[0] === "all") {
+        next.warmAllTools = true;
       } else {
+        next.warmAllTools = false;
         next.warmDuringTools = requested.filter(isToolWarmPreset);
       }
       continue;

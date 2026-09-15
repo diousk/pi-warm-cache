@@ -1004,7 +1004,8 @@ export class SessionWarmer {
   ): void {
     this.ctx = ctx;
     this.providerRequestInFlight = false;
-    const preset = matchToolWarmPreset(event.toolName, event.args, this.config.warmDuringTools);
+    const preset = this.config.warmAllTools ? null
+      : matchToolWarmPreset(event.toolName, event.args, this.config.warmDuringTools);
     this.runningTools.set(event.toolCallId, {
       toolCallId: event.toolCallId,
       toolName: event.toolName,
@@ -1013,7 +1014,7 @@ export class SessionWarmer {
       anchorRevision: this.anchorRevision,
       payloadFingerprint: this.anchor?.payloadFingerprint ?? null,
     });
-    this.syncToolWarmSchedule(ctx, preset ? `${preset} tool running` : "tool not allowlisted");
+    this.syncToolWarmSchedule(ctx, this.config.warmAllTools ? "all-tools policy" : preset ? `${preset} tool running` : "tool not allowlisted");
   }
 
   onToolExecutionEnd(event: { toolCallId: string }, ctx: ExtensionContext): void {
@@ -1075,8 +1076,8 @@ export class SessionWarmer {
     const deferredProbe = this.getDeferredProbe();
     const probeHits = anchor?.probeHitCount ?? 0;
     const probeMisses = anchor?.probeMissCount ?? 0;
-    const toolWarm = this.config.warmDuringTools.length > 0
-      ? `toolWarm=${this.config.warmDuringTools.join(",")} min=${formatDurationShort(this.config.toolWarmMinRuntimeMs)} probes=${this.toolWarmProbeCount}/${this.config.toolWarmMaxProbes}`
+    const toolWarm = this.config.warmAllTools || this.config.warmDuringTools.length > 0
+      ? `toolWarm=${this.config.warmAllTools ? "all" : this.config.warmDuringTools.join(",")} min=${formatDurationShort(this.config.toolWarmMinRuntimeMs)} probes=${this.toolWarmProbeCount}/${this.config.toolWarmMaxProbes}`
       : "toolWarm=off";
     const stableBlock = [
       `lifecycle=${this.lifecycleState}`,
@@ -1181,8 +1182,8 @@ export class SessionWarmer {
     }
     for (const tool of this.runningTools.values()) {
       if (
-        tool.preset === null ||
-        !this.config.warmDuringTools.includes(tool.preset) ||
+        (!this.config.warmAllTools && (tool.preset === null ||
+        !this.config.warmDuringTools.includes(tool.preset))) ||
         tool.anchorRevision !== this.anchorRevision ||
         tool.payloadFingerprint !== this.anchor.payloadFingerprint
       ) {
