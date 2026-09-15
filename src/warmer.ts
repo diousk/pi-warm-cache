@@ -53,6 +53,7 @@ import type {
   WarmDeferralState,
   WarmLifecycleState,
   WarmResult,
+  ToolWarmPreset,
 } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 
@@ -153,7 +154,7 @@ function resolveCompleteRequest(
   if (injected) return injected;
   const complete = ctx.modelRegistry.complete;
   if (!complete) {
-    throw new Error("Pi 0.84 or newer is required for warm probes");
+    throw new Error("Pi 0.85.1 or newer is required for warm probes");
   }
   return complete.bind(ctx.modelRegistry);
 }
@@ -171,6 +172,44 @@ export type RescheduleOptions = {
   /** Why we are waiting (for status text). */
   reason?: string;
 };
+
+type RunningTool = {
+  toolCallId: string;
+  toolName: string;
+  preset: ToolWarmPreset | null;
+  startedAt: number;
+  anchorRevision: number;
+  payloadFingerprint: string | null;
+};
+
+export type ToolCommandArgs = {
+  command?: string;
+  cmd?: string;
+};
+
+function toolCommand(args: ToolCommandArgs): string | null {
+  return args.command ?? args.cmd ?? null;
+}
+
+/** Classify an executing Pi tool using both its tool name and shell command. */
+export function matchToolWarmPreset(
+  toolName: string,
+  args: ToolCommandArgs,
+  enabledPresets: readonly ToolWarmPreset[],
+): ToolWarmPreset | null {
+  if (!enabledPresets.includes("gradle")) return null;
+  const normalizedName = toolName.trim().toLowerCase();
+  if (normalizedName === "gradle") return "gradle";
+  if (normalizedName !== "bash" && normalizedName !== "shell" && normalizedName !== "exec") {
+    return null;
+  }
+  const command = toolCommand(args);
+  if (!command) return null;
+  // Match an executable position, including common `cd ... && ./gradlew` forms.
+  return /(?:^|[;&|]\s*|\n\s*)(?:\.\/)?gradlew(?:\.bat)?(?=\s|$)|(?:^|[;&|]\s*|\n\s*)gradle(?=\s|$)/i.test(command)
+    ? "gradle"
+    : null;
+}
 
 export class SessionWarmer {
   private readonly pi: ExtensionAPI;
@@ -217,6 +256,14 @@ export class SessionWarmer {
   private consecutiveCodexOversized = 0;
   /** Last scheduled probe deferral, retained until a probe gets a slot. */
   private deferredProbe: WarmDeferralState | null = null;
+  /** Monotonic fence for payload/model/branch/compaction changes. */
+  private anchorRevision = 0;
+  /** Tool executions in the current agent run, including unsafe siblings. */
+  private runningTools = new Map<string, RunningTool>();
+  /** Number of provider probes sent during the current tool batch. */
+  private toolWarmProbeCount = 0;
+  /** True from a real provider request start until the assistant response/tool phase. */
+  private providerRequestInFlight = false;
   /** Last warm attempt error/result summary for /warm status. */
   private lastAttempt: {
     at: number;
@@ -412,6 +459,7 @@ export class SessionWarmer {
     reason: string,
     preserveProbe = false,
   ): void {
+    this.anchorRevision += 1;
     const previousAnchor = this.anchor;
     const previousPayload = this.lastPayload;
     const previousCacheKeyFingerprint =
@@ -489,9 +537,11 @@ export class SessionWarmer {
   capturePayload<Payload>(payload: Payload, ctx: ExtensionContext): void {
     if (this.warming || !payloadObject(payload)) return;
 
+    this.anchorRevision += 1;
     this.ctx = ctx;
     this.logFile = warmLogPath(ctx.cwd);
     this.deferredProbe = null;
+    if (this.runningTools.size > 0) this.clearTimers();
     // Any real capture clears this instance's probe-spend soft block and
     // resets the per-provider campaign ledger (the ledger is per-campaign:
     // it bounds each idle stretch rather than the process lifetime).
@@ -853,6 +903,9 @@ export class SessionWarmer {
 
   onAgentStart(ctx: ExtensionContext): void {
     this.ctx = ctx;
+    this.providerRequestInFlight = false;
+    this.runningTools.clear();
+    this.toolWarmProbeCount = 0;
     this.capability = resolveProviderCapability(ctx.model);
     if (!this.config.enabled) {
       this.stateBeforeDisabled = this.lifecycleState;
@@ -882,6 +935,9 @@ export class SessionWarmer {
 
   onAgentSettled(ctx: ExtensionContext): void {
     this.ctx = ctx;
+    this.providerRequestInFlight = false;
+    this.runningTools.clear();
+    this.toolWarmProbeCount = 0;
     if (!this.config.enabled) {
       this.stateBeforeDisabled = this.lifecycleState;
       this.lifecycleState = "disabled";
@@ -924,6 +980,52 @@ export class SessionWarmer {
 
   onModelChange(ctx: ExtensionContext): void {
     this.invalidateAnchor(ctx, "model or thinking level changed · waiting for next turn");
+  }
+
+  /** Mark and capture a real provider request. Warm probes bypass this hook. */
+  onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext): void {
+    if (this.warming) return;
+    this.providerRequestInFlight = true;
+    this.capturePayload(payload, ctx);
+  }
+
+  /** An assistant response ended, so no real provider request is in flight. */
+  onAssistantMessageEnd(ctx: ExtensionContext): void {
+    this.ctx = ctx;
+    this.providerRequestInFlight = false;
+  }
+
+  onToolExecutionStart(
+    event: { toolCallId: string; toolName: string; args: ToolCommandArgs },
+    ctx: ExtensionContext,
+  ): void {
+    this.ctx = ctx;
+    this.providerRequestInFlight = false;
+    const preset = matchToolWarmPreset(event.toolName, event.args, this.config.warmDuringTools);
+    this.runningTools.set(event.toolCallId, {
+      toolCallId: event.toolCallId,
+      toolName: event.toolName,
+      preset,
+      startedAt: Date.now(),
+      anchorRevision: this.anchorRevision,
+      payloadFingerprint: this.anchor?.payloadFingerprint ?? null,
+    });
+    this.syncToolWarmSchedule(ctx, preset ? `${preset} tool running` : "tool not allowlisted");
+  }
+
+  onToolExecutionEnd(event: { toolCallId: string }, ctx: ExtensionContext): void {
+    this.ctx = ctx;
+    this.runningTools.delete(event.toolCallId);
+    if (!this.canWarmDuringTool()) {
+      this.clearTimers();
+      if (this.warming) this.abort?.abort();
+      if (this.runningTools.size === 0) this.toolWarmProbeCount = 0;
+      if (this.currentCapability(ctx).state === "verified" && ctx.hasUI) {
+        ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "warm paused · agent active"));
+      }
+      return;
+    }
+    this.syncToolWarmSchedule(ctx, "eligible tool still running");
   }
 
   /** Manual warm for /warm now */
@@ -970,6 +1072,9 @@ export class SessionWarmer {
     const deferredProbe = this.getDeferredProbe();
     const probeHits = anchor?.probeHitCount ?? 0;
     const probeMisses = anchor?.probeMissCount ?? 0;
+    const toolWarm = this.config.warmDuringTools.length > 0
+      ? `toolWarm=${this.config.warmDuringTools.join(",")} min=${formatDurationShort(this.config.toolWarmMinRuntimeMs)} probes=${this.toolWarmProbeCount}/${this.config.toolWarmMaxProbes}`
+      : "toolWarm=off";
     const stableBlock = [
       `lifecycle=${this.lifecycleState}`,
       `capability=${capability.state}`,
@@ -988,6 +1093,7 @@ export class SessionWarmer {
       "probeSource=extension-only",
       `probeHits=${probeHits}`,
       `probeMisses=${probeMisses}`,
+      toolWarm,
       retry,
       `savingsSummary=${this.getSavingsSummaryText()}`,
       `cacheKey=${cacheKey}`,
@@ -1059,6 +1165,37 @@ export class SessionWarmer {
     return [`enabled family=${anchor.cacheFamily}`, stableBlock].join("\n");
   }
 
+  private canWarmDuringTool(): boolean {
+    if (
+      this.runningTools.size === 0 ||
+      this.providerRequestInFlight ||
+      this.toolWarmProbeCount >= this.config.toolWarmMaxProbes ||
+      !this.anchor ||
+      !this.lastPayload ||
+      !this.plan
+    ) {
+      return false;
+    }
+    for (const tool of this.runningTools.values()) {
+      if (
+        tool.preset === null ||
+        tool.anchorRevision !== this.anchorRevision ||
+        tool.payloadFingerprint !== this.anchor.payloadFingerprint
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private syncToolWarmSchedule(ctx: ExtensionContext, reason: string): void {
+    if (!this.canWarmDuringTool()) {
+      this.clearTimers();
+      return;
+    }
+    this.reschedule({ reason });
+  }
+
   /**
    * Arm the next warm attempt.
    * Pass delayMs for deferral paths (busy / concurrency) so we do not collapse
@@ -1068,6 +1205,12 @@ export class SessionWarmer {
     if (this.disposed || !this.config.enabled) return;
     const ctx = this.ctx;
     if (!ctx) return;
+    const agentIdle = ctx.isIdle();
+    const toolWarmAllowed = this.canWarmDuringTool();
+    if (!agentIdle && !toolWarmAllowed) {
+      this.clearTimers();
+      return;
+    }
     if (this.lifecycleState === "awaiting-reanchor") {
       this.clearTimers();
       return;
@@ -1149,6 +1292,11 @@ export class SessionWarmer {
     } else {
       const elapsed = Date.now() - anchor.lastActivityAt;
       delay = Math.max(1_000, plan.intervalMs - elapsed);
+    }
+    if (toolWarmAllowed) {
+      const newestToolStart = Math.max(...Array.from(this.runningTools.values(), (tool) => tool.startedAt));
+      const untilMinRuntime = newestToolStart + this.config.toolWarmMinRuntimeMs - Date.now();
+      delay = Math.max(delay, 1_000, untilMinRuntime);
     }
 
     // Idle warm cutoff, checked after the delayMs deferral paths merge so a
@@ -1770,7 +1918,8 @@ export class SessionWarmer {
       }
     }
 
-    if (!ctx.isIdle() && reason === "timer") {
+    const inToolWarmWindow = reason === "timer" && this.canWarmDuringTool();
+    if (!ctx.isIdle() && reason === "timer" && !inToolWarmWindow) {
       const deferral = this.deferProbe("agent busy", reason);
       this.recordAttempt(reason, false, `agent busy - ${formatDeferralStatus(deferral)}`);
       this.reschedule({ delayMs: DEFER_BACKOFF_MS, reason: "agent busy" });
@@ -1878,6 +2027,7 @@ export class SessionWarmer {
     this.deferredProbe = null;
     this.warming = true;
     this.abort = new AbortController();
+    if (inToolWarmWindow) this.toolWarmProbeCount += 1;
     const fingerprint = anchor.payloadFingerprint;
     let shouldRescheduleAfter = true;
 

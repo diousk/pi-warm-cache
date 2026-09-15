@@ -7,7 +7,7 @@ Thank you for helping improve pi-warm-cache.
 Use Node.js 22 or newer and pnpm 10.
 
 ```bash
-git clone https://github.com/ribbons-digital/pi-warm-cache.git
+git clone https://github.com/diousk/pi-warm-cache.git
 cd pi-warm-cache
 pnpm install
 ```

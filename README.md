@@ -7,7 +7,7 @@ That cache expires if you leave the session idle.
 The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
-It requires [Pi](https://github.com/badlogic/pi-mono) 0.84 or newer.
+It requires [Pi](https://github.com/badlogic/pi-mono) 0.85.1 or newer.
 
 ## How it works
 
@@ -25,7 +25,7 @@ If those prices are missing, the status shows `n/a`.
 ## Install
 
 ```bash
-pi install npm:pi-warm-cache
+pi install git:github.com/diousk/pi-warm-cache
 ```
 
 Restart or reload Pi after install.
@@ -47,6 +47,7 @@ Restart or reload Pi after install.
 /warm log              # write a local diagnostic log
 /warm nolog            # stop the diagnostic log
 /warm interval=3.5m max=2 maxidle=2h spend=2.5
+/warm tools=gradle toolmin=3m toolmax=6
 ```
 
 You can also set this when Pi starts:
@@ -112,6 +113,9 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
 | `log` / `nolog` | Local JSONL log | off |
+| `tools=` | Allowlisted long-tool presets; currently `gradle`, or `off` | off |
+| `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
+| `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
 
 The 1-hour Anthropic mode follows the cache retention already on the Pi request.
 This extension does not add 1-hour markers to your real turns.
@@ -135,6 +139,7 @@ It does not store prompts or API keys.
 
 - After compaction or a model change, wait for the next real turn.
 - If the agent is busy at a tick, that probe is deferred.
+- With `tools=gradle`, an exact captured request may be replayed while a matching `gradle`/`gradlew` shell command runs. Unallowlisted parallel sibling tools, a new provider request, compaction, branch/model changes, or the probe limit stop in-tool warming.
 - Session resume waits for the first real turn.
 - In print or RPC mode, warming can still run; the widget is hidden when there is no UI.
 - Codex can pause automatic warming if probe output is repeatedly huge; use `/warm resume` or `/warm codex-off`.
@@ -142,3 +147,5 @@ It does not store prompts or API keys.
 ## License
 
 MIT
+
+This repository is derived from [ribbons-digital/pi-warm-cache](https://github.com/ribbons-digital/pi-warm-cache). Original copyright and license notices are retained.

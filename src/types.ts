@@ -89,6 +89,9 @@ export type CacheFamily =
 
 export type AnthropicTtlMode = "5m" | "1h" | "auto";
 
+/** Built-in command classifiers that may warm while the matching tool runs. */
+export type ToolWarmPreset = "gradle";
+
 export interface WarmCacheConfig {
   /** Master switch. Default true. */
   enabled: boolean;
@@ -137,6 +140,12 @@ export interface WarmCacheConfig {
    * Disable with /warm codex-off.
    */
   allowCodexAutoWarm: boolean;
+  /** Opt-in command presets allowed to warm while a tool is still executing. */
+  warmDuringTools: ToolWarmPreset[];
+  /** Minimum matching-tool runtime before the first in-tool probe. */
+  toolWarmMinRuntimeMs: number;
+  /** Maximum provider probes during one uninterrupted matching-tool batch. */
+  toolWarmMaxProbes: number;
 }
 
 export const DEFAULT_CONFIG: WarmCacheConfig = {
@@ -154,6 +163,9 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   maxOutputTokens: 1,
   logToFile: false,
   allowCodexAutoWarm: true,
+  warmDuringTools: [],
+  toolWarmMinRuntimeMs: 180_000,
+  toolWarmMaxProbes: 6,
 };
 
 /** Snapshot of the prefix we must hit on the next warm request. */

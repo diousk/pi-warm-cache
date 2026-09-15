@@ -147,6 +147,14 @@ export default function piWarmCache(pi: ExtensionAPI) {
     warmer.onAgentSettled(ctx);
   });
 
+  pi.on("tool_execution_start", async (event, ctx) => {
+    warmer.onToolExecutionStart(event, ctx);
+  });
+
+  pi.on("tool_execution_end", async (event, ctx) => {
+    warmer.onToolExecutionEnd(event, ctx);
+  });
+
   /**
    * CRITICAL PATH: capture the real serialized provider payload.
    * READ-ONLY - do not return a modified payload.
@@ -155,11 +163,12 @@ export default function piWarmCache(pi: ExtensionAPI) {
    */
   pi.on("before_provider_request", (event, ctx) => {
     if (warmer.isWarming()) return;
-    warmer.capturePayload(event.payload, ctx);
+    warmer.onProviderRequestStart(event.payload, ctx);
   });
 
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
+    warmer.onAssistantMessageEnd(ctx);
     const usage = event.message.usage;
     if (!usage) return;
     warmer.noteAssistantUsage(ctx, usage);
@@ -167,7 +176,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
 
   pi.registerCommand("warm", {
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3]",
+      "Control prompt-cache warming. Usage: /warm [on|off|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|toolmin=3m|toolmax=6]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "savings") {

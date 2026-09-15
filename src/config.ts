@@ -1,4 +1,8 @@
-import { DEFAULT_CONFIG, type WarmCacheConfig } from "./types.ts";
+import { DEFAULT_CONFIG, type ToolWarmPreset, type WarmCacheConfig } from "./types.ts";
+
+function isToolWarmPreset(value: string): value is ToolWarmPreset {
+  return value === "gradle";
+}
 
 export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CONFIG): WarmCacheConfig {
   const next = { ...base };
@@ -86,6 +90,25 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
       if (Number.isFinite(n) && n >= 0) next.minCachedTokens = Math.floor(n);
       continue;
     }
+    if (key === "tools" || key === "tool") {
+      const requested = value.toLowerCase().split(",").map((item) => item.trim()).filter(Boolean);
+      if (requested.some((item) => item === "off" || item === "none")) {
+        next.warmDuringTools = [];
+      } else {
+        next.warmDuringTools = requested.filter(isToolWarmPreset);
+      }
+      continue;
+    }
+    if (key === "toolmin") {
+      const parsed = parseDurationMs(value);
+      if (parsed !== null) next.toolWarmMinRuntimeMs = parsed;
+      continue;
+    }
+    if (key === "toolmax") {
+      const n = Number(value);
+      if (Number.isFinite(n) && n >= 1) next.toolWarmMaxProbes = Math.floor(n);
+      continue;
+    }
     if (key === "ttl") {
       if (value === "5m" || value === "1h" || value === "auto") {
         next.anthropicTtl = value;
@@ -132,4 +155,3 @@ export function formatTokens(n: number): string {
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
-

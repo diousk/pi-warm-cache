@@ -60,7 +60,7 @@ import {
 } from "./savings.ts";
 import { parseConfigArgs } from "./config.ts";
 import piWarmCache from "./index.ts";
-import { resetProbeSpendLedgerForTest, SessionWarmer } from "./warmer.ts";
+import { matchToolWarmPreset, resetProbeSpendLedgerForTest, SessionWarmer } from "./warmer.ts";
 import {
   renderCapabilityNotice,
   renderFailureUi,
@@ -770,8 +770,8 @@ function deepEqualExcept<Actual, Expected>(
 
   // OpenCode Go: per-api proxy route registry with exact baseUrl paths.
   {
-    // Drive the gate from the live pi-ai registry so catalog churn stays
-    // visible: 4 anthropic-messages, 13 openai-completions, 2 openai-responses.
+    // Drive the gate from the Pi 0.85.1 registry so every catalog route is
+    // exercised: 2 anthropic-messages, 21 completions, 4 responses.
     const registryPath = join(
       dirname(fileURLToPath(import.meta.url)),
       "..",
@@ -792,8 +792,8 @@ function deepEqualExcept<Actual, Expected>(
       }
     }
     assert(
-      goModels.length === 19,
-      `expected 19 OpenCode Go registry models, got ${goModels.length}`,
+      goModels.length === 27,
+      `expected 27 OpenCode Go registry models, got ${goModels.length}`,
     );
     const goApiCounts: Record<string, number> = {};
     for (const model of goModels) {
@@ -859,9 +859,9 @@ function deepEqualExcept<Actual, Expected>(
         `opencode-go ${model.id} should register the exact ${expectedPath} baseUrl`,
       );
     }
-    assert(goApiCounts["anthropic-messages"] === 4, "expected 4 anthropic-messages models");
-    assert(goApiCounts["openai-completions"] === 13, "expected 13 openai-completions models");
-    assert(goApiCounts["openai-responses"] === 2, "expected 2 openai-responses models");
+    assert(goApiCounts["anthropic-messages"] === 2, "expected 2 anthropic-messages models");
+    assert(goApiCounts["openai-completions"] === 21, "expected 21 openai-completions models");
+    assert(goApiCounts["openai-responses"] === 4, "expected 4 openai-responses models");
 
     // The single responses model carries the registered routing metadata and
     // resolves through its exact path; the anthropic-messages models need no
@@ -2495,7 +2495,7 @@ function deepEqualExcept<Actual, Expected>(
   const refused = await oldHost.warmNow(missing);
   assert(refused.ok === false, "missing modelRegistry.complete should fail the probe");
   assert(
-    (refused.error ?? "").includes("Pi 0.84"),
+    (refused.error ?? "").includes("Pi 0.85.1"),
     `old hosts should get a floor error, got ${refused.error}`,
   );
   oldHost.dispose();
@@ -5166,6 +5166,103 @@ function deepEqualExcept<Actual, Expected>(
     "missing provider must emit no savingsUnit marker",
   );
 
+  rmSync(cwd, { recursive: true, force: true });
+}
+
+// Tool-aware warming: Gradle is opt-in, command-aware, fenced, and bounded.
+{
+  const configured = parseConfigArgs("tools=gradle toolmin=2m toolmax=4");
+  assert(configured.warmDuringTools.length === 1 && configured.warmDuringTools[0] === "gradle", "tools=gradle should enable the Gradle preset");
+  assert(configured.toolWarmMinRuntimeMs === 120_000, "toolmin should parse a duration");
+  assert(configured.toolWarmMaxProbes === 4, "toolmax should parse a positive integer");
+  assert(
+    matchToolWarmPreset("bash", { command: "cd android && ./gradlew assembleRelease" }, ["gradle"]) === "gradle",
+    "the Gradle preset should inspect bash command arguments",
+  );
+  assert(
+    matchToolWarmPreset("bash", { command: "npm test" }, ["gradle"]) === null,
+    "the Gradle preset must not allow unrelated bash commands",
+  );
+  assert(
+    matchToolWarmPreset("bash", { command: "./gradlew test" }, []) === null,
+    "tool warming must remain opt-in",
+  );
+
+  const cwd = mkdtempSync(join(tmpdir(), "pi-warm-cache-tool-aware-"));
+  const model = modelFixture({
+    id: "gpt-5.6",
+    provider: "openai",
+    api: "openai-responses",
+    baseUrl: "https://api.openai.com/v1",
+  });
+  let calls = 0;
+  const completeStub = completeFixture(async () => {
+    calls += 1;
+    return { stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 100, cacheWrite: 0 } };
+  });
+  const ctx = contextFixture({
+    cwd,
+    model,
+    hasUI: false,
+    ui: { theme: { fg: (_color: string, text: string) => text }, setStatus: () => undefined, setWidget: () => undefined },
+    thinkingLevel: "off",
+    isIdle: () => false,
+    sessionManager: { getSessionId: () => "tool-aware-test" },
+    modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: {}, env: {} }),
+    },
+  });
+  const payload = {
+    model: model.id,
+    input: [{ role: "user", content: [{ type: "input_text", text: "build the app" }] }],
+    prompt_cache_key: "tool-aware-test",
+  };
+  const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "off" }), completeStub);
+  warmer.bindContext(ctx);
+  warmer.setConfig({
+    ...DEFAULT_CONFIG,
+    minCachedTokens: 10,
+    intervalMs: 60_000,
+    warmDuringTools: ["gradle"],
+    toolWarmMinRuntimeMs: 0,
+    toolWarmMaxProbes: 1,
+  });
+  warmer.capturePayload(payload, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  warmer.onToolExecutionStart(
+    { toolCallId: "gradle-1", toolName: "bash", args: { command: "./gradlew build" } },
+    ctx,
+  );
+  const inTool = await runTimerWarm(warmer);
+  assert(inTool.ok && calls === 1, "an allowlisted Gradle execution should permit a busy-agent timer probe");
+
+  const bounded = await runTimerWarm(warmer);
+  assert(!bounded.ok && calls === 1, "toolmax must prevent another provider probe in the same tool batch");
+  warmer.onToolExecutionEnd({ toolCallId: "gradle-1" }, ctx);
+
+  warmer.onToolExecutionStart(
+    { toolCallId: "gradle-2", toolName: "bash", args: { command: "./gradlew test" } },
+    ctx,
+  );
+  warmer.onProviderRequestStart({ ...payload, prompt_cache_key: "changed-during-tool" }, ctx);
+  const fenced = await runTimerWarm(warmer);
+  assert(!fenced.ok && calls === 1, "a new provider payload must fence off the running tool's old anchor");
+  warmer.onToolExecutionEnd({ toolCallId: "gradle-2" }, ctx);
+
+  warmer.capturePayload(payload, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  warmer.onToolExecutionStart(
+    { toolCallId: "gradle-3", toolName: "bash", args: { command: "./gradlew build" } },
+    ctx,
+  );
+  warmer.onToolExecutionStart(
+    { toolCallId: "unsafe-sibling", toolName: "bash", args: { command: "npm test" } },
+    ctx,
+  );
+  const siblingBlocked = await runTimerWarm(warmer);
+  assert(!siblingBlocked.ok && calls === 1, "an unallowlisted parallel sibling must block in-tool warming");
+
+  warmer.dispose();
   rmSync(cwd, { recursive: true, force: true });
 }
 
