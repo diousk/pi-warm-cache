@@ -205,8 +205,10 @@ export function matchToolWarmPreset(
   }
   const command = toolCommand(args);
   if (!command) return null;
-  // Match an executable position, including common `cd ... && ./gradlew` forms.
-  return /(?:^|[;&|]\s*|\n\s*)(?:\.\/)?gradlew(?:\.bat)?(?=\s|$)|(?:^|[;&|]\s*|\n\s*)gradle(?=\s|$)/i.test(command)
+  // Deliberately accept only a small shell grammar: optional literal cd,
+  // then one Gradle command with plain arguments. Quotes, substitutions,
+  // pipelines, background jobs and trailing commands fail closed.
+  return /^(?:cd[ \t]+[A-Za-z0-9_./-]+[ \t]+&&[ \t]+)?(?:\.\/gradlew|gradlew|gradle)(?:[ \t]+[A-Za-z0-9_./:=,@%+-]+)*[ \t]*$/.test(command.trim())
     ? "gradle"
     : null;
 }
@@ -535,7 +537,7 @@ export class SessionWarmer {
 
   /** Capture the exact provider payload from a real agent turn. Read-only. */
   capturePayload<Payload>(payload: Payload, ctx: ExtensionContext): void {
-    if (this.warming || !payloadObject(payload)) return;
+    if (!payloadObject(payload)) return;
 
     this.anchorRevision += 1;
     this.ctx = ctx;
@@ -984,7 +986,8 @@ export class SessionWarmer {
 
   /** Mark and capture a real provider request. Warm probes bypass this hook. */
   onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext): void {
-    if (this.warming) return;
+    this.abort?.abort();
+    this.clearTimers();
     this.providerRequestInFlight = true;
     this.capturePayload(payload, ctx);
   }
@@ -1179,6 +1182,7 @@ export class SessionWarmer {
     for (const tool of this.runningTools.values()) {
       if (
         tool.preset === null ||
+        !this.config.warmDuringTools.includes(tool.preset) ||
         tool.anchorRevision !== this.anchorRevision ||
         tool.payloadFingerprint !== this.anchor.payloadFingerprint
       ) {
@@ -2027,6 +2031,8 @@ export class SessionWarmer {
     this.deferredProbe = null;
     this.warming = true;
     this.abort = new AbortController();
+    const probeAbort = this.abort;
+    const probeRevision = this.anchorRevision;
     if (inToolWarmWindow) this.toolWarmProbeCount += 1;
     const fingerprint = anchor.payloadFingerprint;
     let shouldRescheduleAfter = true;
@@ -2071,6 +2077,9 @@ export class SessionWarmer {
           cacheRetention: plan.cacheRetention,
           sessionId: anchor.sessionId,
           onPayload: () => {
+            if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
+              throw new Error("probe superseded");
+            }
             // 1) Clone last real payload (exact tools/system/history prefix).
             // 2) Codex only: append constrained warm user turn so the model is
             //    not asked to continue the agent trajectory (no output cap).
@@ -2097,6 +2106,9 @@ export class SessionWarmer {
         },
       );
 
+      if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
+        return buildWarmResult({ fingerprint, error: "probe superseded", anchor });
+      }
       if (response.stopReason === "aborted") {
         throw new Error("aborted");
       }
@@ -2273,6 +2285,11 @@ export class SessionWarmer {
 
       return result;
     } catch (err) {
+      // Expected cancellation must not damage the new anchor or count as a
+      // provider failure. Abort is advisory, so also fence late completions.
+      if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
+        return buildWarmResult({ fingerprint, error: "probe superseded", anchor });
+      }
       if (!unverifiedProbe) anchor.consecutiveFailures += 1;
       const message = err instanceof Error ? err.message : String(err);
       const xaiBestEffort = model.provider === "xai";

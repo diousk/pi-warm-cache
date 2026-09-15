@@ -5266,4 +5266,61 @@ function deepEqualExcept<Actual, Expected>(
   rmSync(cwd, { recursive: true, force: true });
 }
 
+// Review regressions: strict command grammar and a real request racing a probe.
+{
+  for (const command of [
+    'echo "hello; gradle build"', './gradlew --version; sleep 3600',
+    'curl example.com | gradle build', './gradlew build &',
+    './gradlew test $(sleep 300)', './gradlew test\nsleep 300',
+  ]) {
+    assert(matchToolWarmPreset("bash", { command }, ["gradle"]) === null,
+      `compound or quoted shell syntax must fail closed: ${command}`);
+  }
+  for (const command of ['./gradlew build', 'gradle test --no-daemon', 'cd android && ./gradlew :app:test']) {
+    assert(matchToolWarmPreset("bash", { command }, ["gradle"]) === "gradle", "simple Gradle grammar should be accepted");
+  }
+  const ctx = contextFixture({
+    cwd: process.cwd(), hasUI: false, isIdle: () => false,
+    model: modelFixture({id: "gpt-5.6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1"}),
+    thinkingLevel: "off", sessionManager: { getSessionId: () => "review-race" },
+    ui: { setStatus() {}, setWidget() {}, theme: { fg: (_: string, s: string) => s } },
+  });
+  const hooks: FirstProbeHooks = {};
+  let signal: AbortSignal | undefined;
+  const stub = completeFixture(async (_model: Model<any>, _context: WarmCompleteContext, options: {signal: AbortSignal}) => {
+    signal = options.signal;
+    return new Promise<ProbeReply>((resolve) => { hooks.release = resolve; });
+  });
+  const warmer = new SessionWarmer(extensionApiFixture({getThinkingLevel: () => "off"}), stub);
+  warmer.bindContext(ctx);
+  warmer.setConfig({...DEFAULT_CONFIG, warmDuringTools: ["gradle"], minCachedTokens: 10, toolWarmMinRuntimeMs: 0});
+  const payload = {model: "gpt-5.6", input: [{role: "user", content: "build"}], prompt_cache_key: "review-race"};
+  warmer.onProviderRequestStart(payload, ctx);
+  warmer.onAssistantMessageEnd(ctx);
+  warmer.noteAssistantUsage(ctx, {cacheRead: 100});
+  warmer.onToolExecutionStart({toolCallId: "g", toolName: "bash", args: {command: "./gradlew build"}}, ctx);
+  warmer.setConfig({...warmer.getConfig(), toolWarmMaxProbes: 4});
+  warmer.reschedule();
+  assert(!warmer.getStatusText().includes("nextDue=none"), "config changes must preserve the active tool timer");
+  const pending = runTimerWarm(warmer);
+  assert(hooks.release !== undefined, "probe must be in flight");
+  warmer.onToolExecutionEnd({toolCallId: "g"}, ctx);
+  assert(signal?.aborted === true, "tool completion must cancel the outstanding probe");
+  const next = {...payload, input: [...payload.input, {role: "user", content: "next real turn"}]};
+  warmer.onProviderRequestStart(next, ctx);
+  assert(warmer.getLatestRealTurnObservation()?.payloadFingerprint === stableFingerprint(next),
+    "real request must be captured even before the old probe settles");
+  hooks.release({stopReason: "stop", usage: {input: 0, output: 1, cacheRead: 100, cacheWrite: 0}});
+  const cancelled = await pending;
+  assert(!cancelled.ok, "late success from a cancelled probe must be discarded");
+  assert(warmer.getLatestProbeObservation() === null, "cancelled probe must not overwrite observations");
+  assert(warmer.getStatusText().includes("probeFailStreak=0/"), "cancellation is not a provider failure");
+  assert(warmer.getActiveWarmSessions() === 0, "cancellation must release the concurrency slot");
+  warmer.dispose();
+
+  const entry = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+  assert(!entry.slice(entry.indexOf('pi.registerCommand("warm"')).includes("onAgentSettled"),
+    "command handlers must not synthesize an agent-settled event");
+}
+
 console.log("provider.test.ts: all assertions passed");

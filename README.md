@@ -117,6 +117,16 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
 
+The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
+command with plain arguments, optionally prefixed by `cd android &&` (or
+another literal directory). Quoted arguments, substitutions, pipelines,
+background jobs and trailing commands are deliberately rejected. For example,
+`./gradlew build` is eligible but `./gradlew --version; sleep 3600` is not.
+Changing `/warm` settings during a tool run preserves its lifecycle tracking.
+When real work resumes, an outstanding probe is cancelled and any late result
+is ignored; cancellation is not counted as a provider failure. Cancellation
+cannot guarantee that the provider stops processing or billing the request.
+
 The 1-hour Anthropic mode follows the cache retention already on the Pi request.
 This extension does not add 1-hour markers to your real turns.
 

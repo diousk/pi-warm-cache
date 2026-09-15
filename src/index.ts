@@ -162,7 +162,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
    * and silently doubles cache-write cost outside Pi's retention gates.
    */
   pi.on("before_provider_request", (event, ctx) => {
-    if (warmer.isWarming()) return;
+    // Registry.complete probes use their own onPayload, not this agent hook.
     warmer.onProviderRequestStart(event.payload, ctx);
   });
 
@@ -295,7 +295,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
           `${warmer.isXaiRoute() ? "xAI best-effort " : "pi-warm-cache "}sticky block cleared. Timers resume if enabled (use /warm codex-off to disable Codex auto-warm).`,
           "info",
         );
-        warmer.onAgentSettled(ctx);
+        warmer.reschedule();
         return;
       }
 
@@ -312,7 +312,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
             : "Codex auto-warm disabled. /warm now still works for a one-shot probe.",
           "info",
         );
-        warmer.onAgentSettled(ctx);
+        warmer.reschedule();
         return;
       }
 
@@ -341,7 +341,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
         `pi-warm-cache${warmer.isXaiRoute() ? " xAI best-effort" : ""} on (ttl=${config.anthropicTtl}, interval=${config.intervalMs ?? "auto"}, max=${config.maxConcurrentWarmSessions}, log=${config.logToFile ? "on" : "off"}${block ? `, autoWarm=blocked` : ""})`,
         "info",
       );
-      warmer.onAgentSettled(ctx);
+      warmer.reschedule();
     },
   });
 }
