@@ -1,0 +1,338 @@
+/**
+ * pi-warm-cache
+ *
+ * Keeps Anthropic / OpenAI prompt caches warm during long idle gaps in a Pi session.
+ *
+ * Core idea:
+ * 1. Snapshot the exact provider payload on each real turn (`before_provider_request`).
+ *    This hook is READ-ONLY. We never rewrite real user turns.
+ * 2. After the agent settles, start a provider-specific timer (4m / 50m / 24m / ...).
+ * 3. On tick, replay that payload with a minimal legal output cap via `modelRegistry.complete({ onPayload })`.
+ * 4. Never use `sendUserMessage` for warming (would pollute the session and run tools).
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { parseConfigArgs } from "./config.ts";
+import { DEFAULT_CONFIG } from "./types.ts";
+import { SessionWarmer } from "./warmer.ts";
+import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
+
+/**
+ * Resolve the notification level and failure label for a failed /warm now
+ * result. A by-design refusal on a verified no-keepalive route (for example
+ * the retained family, which never probes) is not an error: the route is
+ * healthy and the refusal is the documented behavior, so it renders at
+ * warning level with the refusal explanation. Real failures on verified
+ * routes stay errors, and unverified route refusals keep the warning level.
+ * Returns null for a successful result.
+ */
+export function resolveWarmNowFailure(args: {
+  ok: boolean;
+  unavailable?: boolean;
+  capabilityState?: string;
+  automaticWarm: boolean;
+  xaiBestEffort: boolean;
+}): { level: "warning" | "error"; failureLabel: string } | null {
+  if (args.ok) return null;
+  const deliberateRefusal =
+    args.unavailable === true &&
+    args.capabilityState === "verified" &&
+    !args.automaticWarm;
+  return {
+    level: deliberateRefusal || args.capabilityState === "unverified" ? "warning" : "error",
+    failureLabel: deliberateRefusal
+      ? "Probe unavailable"
+      : args.unavailable || args.capabilityState === "unsupported"
+        ? `${args.xaiBestEffort ? "xAI best-effort probe" : "Probe"} unavailable`
+        : `${args.xaiBestEffort ? "xAI best-effort probe" : "Probe"} failed`,
+  };
+}
+
+export default function piWarmCache(pi: ExtensionAPI) {
+  const warmer = new SessionWarmer(pi);
+  let config = { ...DEFAULT_CONFIG };
+  let lastCapabilityNoticeKey: string | null = null;
+
+  // Optional CLI: pi --warm-cache / pi --warm-cache=off
+  pi.registerFlag("warm-cache", {
+    description: "Enable or configure pi-warm-cache (true/false or config tokens)",
+    type: "string",
+    default: "true",
+  });
+
+  pi.on("session_start", async (event, ctx) => {
+    warmer.bindContext(ctx);
+
+    // Opt-in file diagnostics. Never default-write into the project cwd.
+    const envDebug = process.env.PI_WARM_CACHE_DEBUG;
+    if (envDebug === "1" || envDebug === "true" || envDebug === "on") {
+      config = { ...config, logToFile: true };
+    }
+
+    const flag = pi.getFlag("warm-cache");
+    if (Object.prototype.toString.call(flag) === "[object String]") {
+      const value = String(flag);
+      if (value === "false" || value === "0" || value === "off") {
+        config = { ...config, enabled: false };
+      } else if (value === "true" || value === "1" || value === "on") {
+        config = { ...config, enabled: true };
+      } else {
+        config = parseConfigArgs(value, config);
+      }
+    }
+
+    warmer.setConfig(config);
+
+    // Payload anchors are never restored across resume (turn-specific).
+    // Stats persistence can be added later via appendEntry.
+
+    if (config.enabled && ctx.hasUI) {
+      const capability = warmer.getCapability();
+      if (capability.state === "verified") {
+        lastCapabilityNoticeKey = null;
+        if (event.reason === "startup") {
+          ctx.ui.setStatus(
+            "pi-warm-cache",
+            ctx.ui.theme.fg(
+              "dim",
+              capability.automaticWarm
+                ? "warm ready · waiting for first cached turn"
+                : "verified · keepalive not needed",
+            ),
+          );
+        }
+      } else {
+        const noticeKey = `${capability.state}:${capability.reason}:${capability.manualProbe}`;
+        if (noticeKey !== lastCapabilityNoticeKey) {
+          renderCapabilityNotice(ctx, capability, config);
+          lastCapabilityNoticeKey = noticeKey;
+        }
+      }
+    }
+  });
+
+  pi.on("session_shutdown", async () => {
+    lastCapabilityNoticeKey = null;
+    warmer.dispose();
+  });
+
+  pi.on("model_select", async (_event, ctx) => {
+    warmer.bindContext(ctx);
+    warmer.onModelChange(ctx);
+  });
+
+  pi.on("thinking_level_select", async (_event, ctx) => {
+    // Effort is part of many cache keys. Force re-anchor.
+    warmer.bindContext(ctx);
+    warmer.onModelChange(ctx);
+  });
+
+  // Compaction changes the prompt prefix. Old payload must not be replayed.
+  pi.on("session_compact", async (_event, ctx) => {
+    warmer.invalidateAnchor(ctx, "compacted · waiting for next turn");
+  });
+
+  // Branch / tree navigation changes the active prefix.
+  pi.on("session_tree", async (_event, ctx) => {
+    warmer.invalidateAnchor(ctx, "branch changed · waiting for next turn");
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    warmer.bindContext(ctx);
+    warmer.onAgentStart(ctx);
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    warmer.bindContext(ctx);
+    warmer.onAgentSettled(ctx);
+  });
+
+  /**
+   * CRITICAL PATH: capture the real serialized provider payload.
+   * READ-ONLY - do not return a modified payload.
+   * Rewriting real turns (e.g. forcing ttl:1h) can 400 unsupported routes
+   * and silently doubles cache-write cost outside Pi's retention gates.
+   */
+  pi.on("before_provider_request", (event, ctx) => {
+    if (warmer.isWarming()) return;
+    warmer.capturePayload(event.payload, ctx);
+  });
+
+  pi.on("message_end", async (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    const usage = event.message.usage;
+    if (!usage) return;
+    warmer.noteAssistantUsage(ctx, usage);
+  });
+
+  pi.registerCommand("warm", {
+    description:
+      "Control prompt-cache warming. Usage: /warm [on|off|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3]",
+    handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      if (trimmed.toLowerCase() === "savings") {
+        const summary = warmer.getSavingsSummaryText();
+        ctx.ui.notify(warmer.isXaiRoute() ? `xAI best-effort ${summary}` : summary, "info");
+        return;
+      }
+      if (!trimmed || trimmed === "status") {
+        ctx.ui.notify(warmer.getStatusText(), "info");
+        return;
+      }
+      if (trimmed === "now") {
+        if (!ctx.isIdle()) {
+          ctx.ui.notify("Agent is busy. Try /warm now when idle.", "warning");
+          return;
+        }
+        // Manual ping is allowed even when auto-warm is sticky-blocked.
+        const result = await warmer.warmNow(ctx);
+        const xaiBestEffort =
+          result.provider === "xai" ||
+          result.family === "xai-best-effort" ||
+          /xai/i.test(result.capabilityReason ?? "");
+        const route = `${result.provider ?? "unknown"}/${result.modelId ?? "unknown"} api=${result.api ?? "unknown"}`;
+        const capability =
+          `capability=${result.capabilityState ?? "unknown"} reason=${result.capabilityReason ?? "unknown"}`;
+        const usage =
+          `extensionProbe read=${result.cacheRead} write=${result.cacheWrite} in=${result.input} ` +
+          `out=${result.output} cost=$${result.costUsd.toFixed(4)}`;
+        const fingerprint = `pfp=${result.fingerprint ? result.fingerprint.slice(0, 8) : "none"}`;
+        const strategy =
+          `strategy=${result.family ?? "unknown"} cadence=${result.strategyLabel ?? "unknown"} ` +
+          `intervalMs=${result.intervalMs ?? "none"}`;
+        const cacheKey = `cacheKey=${result.cacheKeyFingerprint ?? "none"}`;
+        const retry = `retry=${result.retryState ?? "none"}`;
+        const activeWarmSessions = result.deferred
+          ? `${result.deferred.activeWarmSessions}/${result.deferred.maxConcurrentWarmSessions}`
+          : `${warmer.getActiveWarmSessions()}/${warmer.getConfig().maxConcurrentWarmSessions}`;
+        const activeWarm = `activeWarmSessions=${activeWarmSessions}`;
+        const manualOnly =
+          result.capabilityState === "unverified" && warmer.getCapability().manualProbe;
+        const manualOnlyWarning =
+          result.capabilityState === "unverified"
+            ? manualOnly
+              ? `WARNING: ${xaiBestEffort ? "xAI best-effort " : ""}manual-only route; automatic warming is disabled, /warm now is the only probe path, and savings are n/a (unverified route). `
+              : "WARNING: automatic warming is disabled for this unverified route; no safe manual probe is available. "
+            : "";
+        const savings =
+          result.capabilityState === "unverified"
+            ? "savingsSummary=n/a (unverified route)"
+            : `savingsSummary=${warmer.getSavingsSummaryText()}`;
+        const deferral = result.deferred
+          ? `deferred=${result.deferred.reason} (${result.deferred.activeWarmSessions}/${result.deferred.maxConcurrentWarmSessions} slots used); `
+          : "";
+        const diagnostics =
+          `${route}; ${capability}; ${strategy}; ${cacheKey}; ${usage}; ` +
+          `source=extension-only; ${fingerprint}; ${retry}; ${activeWarm}; ${deferral}${savings}`;
+        if (result.deferred) {
+          ctx.ui.notify(`Probe deferred - ${result.deferred.reason} (${diagnostics})`, "warning");
+          return;
+        }
+        if (!result.ok) {
+          const refusal = resolveWarmNowFailure({
+            ok: result.ok,
+            unavailable: result.unavailable,
+            capabilityState: result.capabilityState,
+            automaticWarm: warmer.getCapability().automaticWarm,
+            xaiBestEffort,
+          });
+          ctx.ui.notify(
+            `${manualOnlyWarning}${refusal?.failureLabel ?? "Probe failed"}: ${result.error} (${diagnostics})`,
+            refusal?.level ?? "error",
+          );
+          return;
+        }
+        if (result.capabilityState === "unverified") {
+          ctx.ui.notify(
+            `${manualOnlyWarning}${xaiBestEffort ? "xAI best-effort " : ""}unverified manual probe ${result.cacheHit ? "hit" : "miss"} (${diagnostics}). No active keepalive or verified savings claim.`,
+            "warning",
+          );
+          return;
+        }
+        const probeLabel = xaiBestEffort
+          ? "xAI best-effort extension probe"
+          : "Extension probe";
+        if (result.probeOutcome === "transient-miss") {
+          ctx.ui.notify(
+            `${probeLabel} miss (transient; retry scheduled) (${diagnostics})`,
+            "info",
+          );
+          return;
+        }
+        if (result.probeOutcome === "payload-drift") {
+          ctx.ui.notify(`${probeLabel} miss (payload drift; re-anchor required) (${diagnostics})`, "warning");
+          return;
+        }
+        ctx.ui.notify(
+          result.cacheHit
+            ? `${probeLabel} hit (${diagnostics})`
+            : `${probeLabel} miss (${diagnostics})`,
+          result.cacheHit ? "info" : "warning",
+        );
+        return;
+      }
+
+      const lower = trimmed.toLowerCase();
+      const resumeRequested =
+        lower === "resume" ||
+        lower === "on" ||
+        lower.split(/\s+/).includes("resume") ||
+        lower.split(/\s+/).includes("on");
+
+      if (lower === "resume") {
+        warmer.bindContext(ctx);
+        warmer.clearAutoWarmBlock("user /warm resume");
+        ctx.ui.notify(
+          `${warmer.isXaiRoute() ? "xAI best-effort " : "pi-warm-cache "}sticky block cleared. Timers resume if enabled (use /warm codex-off to disable Codex auto-warm).`,
+          "info",
+        );
+        warmer.onAgentSettled(ctx);
+        return;
+      }
+
+      if (lower === "codex-on" || lower === "codex-off") {
+        config = parseConfigArgs(trimmed, warmer.getConfig());
+        warmer.bindContext(ctx);
+        if (lower === "codex-on") {
+          warmer.clearAutoWarmBlock("user /warm codex-on");
+        }
+        warmer.setConfig(config);
+        ctx.ui.notify(
+          lower === "codex-on"
+            ? "Codex auto-warm enabled (OK-suffix path). Sticky block still applies if out is huge."
+            : "Codex auto-warm disabled. /warm now still works for a one-shot probe.",
+          "info",
+        );
+        warmer.onAgentSettled(ctx);
+        return;
+      }
+
+      config = parseConfigArgs(trimmed, warmer.getConfig());
+      warmer.bindContext(ctx);
+      if (resumeRequested && config.enabled) {
+        warmer.clearAutoWarmBlock("user /warm on");
+      }
+      warmer.setConfig(config);
+
+      if (!config.enabled) {
+        clearWarmUi(ctx);
+        ctx.ui.notify("pi-warm-cache disabled", "info");
+        return;
+      }
+
+      if (config.anthropicTtl === "1h") {
+        ctx.ui.notify(
+          "1h mode follows Pi's on-wire long TTL. This extension does not rewrite real turns. Set Pi cache retention to long if you want 1h caches.",
+          "info",
+        );
+      }
+
+      const block = warmer.getAutoWarmBlockReason();
+      ctx.ui.notify(
+        `pi-warm-cache${warmer.isXaiRoute() ? " xAI best-effort" : ""} on (ttl=${config.anthropicTtl}, interval=${config.intervalMs ?? "auto"}, max=${config.maxConcurrentWarmSessions}, log=${config.logToFile ? "on" : "off"}${block ? `, autoWarm=blocked` : ""})`,
+        "info",
+      );
+      warmer.onAgentSettled(ctx);
+    },
+  });
+}
