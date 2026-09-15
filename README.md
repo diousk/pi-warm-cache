@@ -35,8 +35,7 @@ Restart or reload Pi after install.
 ```text
 /warm                  # show status and savings
 /warm config           # show effective runtime configuration and JSON file path
-/warm stat             # show warm statistics and status (alias of status)
-/warm status           # same as /warm stat
+/warm status           # show warm statistics and status
 /warm savings          # show only the savings summary
 /warm on               # enable warming
 /warm off              # disable warming
@@ -185,9 +184,9 @@ This extension does not add 1-hour markers to your real turns.
 `/warm config` shows the current effective settings, including startup JSON,
 CLI and runtime overrides, not a fresh read of the config file. It also shows
 the config file path. `null` values mean provider/default policy rather than
-a resolved interval; use `/warm stat` to inspect the resolved strategy.
+a resolved interval; use `/warm status` to inspect the resolved strategy.
 
-`/warm stat`, `/warm status`, and bare `/warm` are read-only equivalents:
+`/warm status` and bare `/warm` are read-only equivalents:
 they report lifecycle, route, tool policy, next probe, hits/misses, probe cost,
 estimated savings, failure/deferral state and the last attempt. These commands
 do not toggle warming, reset counters, change timers or send a probe.

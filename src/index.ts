@@ -183,14 +183,14 @@ export default function piWarmCache(pi: ExtensionAPI) {
 
   pi.registerCommand("warm", {
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|stat|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {
         ctx.ui.notify(
           `Effective runtime configuration (not just file contents)\nConfig file: ${warmCacheConfigPath()}\n` +
           `${JSON.stringify(warmer.getConfig(), null, 2)}\n` +
-          "Durations are milliseconds. null uses provider/default policy; see /warm stat for resolved status.",
+          "Durations are milliseconds. null uses provider/default policy; see /warm status for resolved status.",
           "info",
         );
         return;
@@ -200,7 +200,11 @@ export default function piWarmCache(pi: ExtensionAPI) {
         ctx.ui.notify(warmer.isXaiRoute() ? `xAI best-effort ${summary}` : summary, "info");
         return;
       }
-      if (!trimmed || trimmed.toLowerCase() === "status" || trimmed.toLowerCase() === "stat") {
+      if (trimmed.toLowerCase() === "stat") {
+        ctx.ui.notify("Unknown command: stat. Use /warm status.", "warning");
+        return;
+      }
+      if (!trimmed || trimmed.toLowerCase() === "status") {
         ctx.ui.notify(warmer.getStatusText(), "info");
         return;
       }

@@ -5398,7 +5398,7 @@ function deepEqualExcept<Actual, Expected>(
   warmer.dispose();
 }
 
-// Read-only config/stat commands work while disabled and preserve overrides.
+// Read-only config/status commands work while disabled and preserve overrides.
 {
   const notices: string[] = [];
   let handler: ((args: string, ctx: ExtensionContext) => Promise<void>) | undefined;
@@ -5417,16 +5417,16 @@ function deepEqualExcept<Actual, Expected>(
   const currentConfig = notices.at(-1)!;
   assert(currentConfig.includes('"enabled": false') && currentConfig.includes('"warmAllTools": true') && currentConfig.includes('"toolWarmMaxProbes": 4'), "config must reflect live overrides");
   assert(currentConfig.includes("warm-cache.json"), "config must show the file path");
-  await handler("stat", ctx);
+  await handler("status", ctx);
   const stat = notices.at(-1)!;
   assert(stat.startsWith("disabled") && stat.includes("probeHits=0") && stat.includes("probeMisses=0") && stat.includes("nextDue=none") && stat.includes("savingsSummary=n/a"), "stat must contain status and statistics without an anchor; unavailable pricing must stay n/a");
-  await handler("status", ctx);
-  assert(notices.at(-1) === stat, "stat and status must be equivalent");
+  await handler("stat", ctx);
+  assert(notices.at(-1) === "Unknown command: stat. Use /warm status.", "removed stat alias must not fall through to settings mutation");
   await handler("", ctx);
   assert(notices.at(-1) === stat, "bare warm must remain equivalent");
   await handler(" CONFIG ", ctx);
   assert(notices.at(-1) === currentConfig, "inspection must not change config; casing and whitespace are accepted");
-  await handler(" STAT ", ctx);
+  await handler(" STATUS ", ctx);
   assert(notices.at(-1) === stat, "inspection must not change counters or lifecycle");
   assert(notices.length === 6, "each read command must emit exactly one response");
 }
