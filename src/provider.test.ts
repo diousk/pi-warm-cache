@@ -6,7 +6,7 @@
  * Do not launch this in the same parallel batch as an edit of this file.
  */
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import type { Model } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
@@ -58,7 +58,7 @@ import {
   formatSavingsSummary,
   resolveModelPricing,
 } from "./savings.ts";
-import { parseConfigArgs } from "./config.ts";
+import { loadConfigJson, parseConfigJson, parseConfigArgs } from "./config.ts";
 import piWarmCache from "./index.ts";
 import { matchToolWarmPreset, resetProbeSpendLedgerForTest, SessionWarmer } from "./warmer.ts";
 import {
@@ -5321,6 +5321,35 @@ function deepEqualExcept<Actual, Expected>(
   const entry = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   assert(!entry.slice(entry.indexOf('pi.registerCommand("warm"')).includes("onAgentSettled"),
     "command handlers must not synthesize an agent-settled event");
+}
+
+// Persistent JSON defaults are distinct from runtime on/off overrides.
+{
+  const text = JSON.stringify({enabled: false, warmDuringTools: ["gradle"], toolWarmMinRuntimeMs: 180000, toolWarmMaxProbes: 6});
+  const config = parseConfigJson(text);
+  const on = parseConfigArgs("on", config);
+  const off = parseConfigArgs("off", on);
+  assert(on.enabled && !off.enabled && off.warmDuringTools[0] === "gradle", "toggle must preserve JSON policy");
+  assert(on.intervalMs === null, "omitted JSON values must inherit built-in defaults");
+  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":["browser"]}', '{"typo":true}', '{"__proto__":{}}']) {
+    let rejected = false;
+    try { parseConfigJson(bad); } catch { rejected = true; }
+    assert(rejected, `invalid JSON must be rejected atomically: ${bad}`);
+  }
+  const directory = mkdtempSync(join(tmpdir(), "warm-config-test-"));
+  try {
+    const path = join(directory, "warm-cache.json");
+    assert(loadConfigJson(path).error === undefined, "missing file must remain optional");
+    writeFileSync(path, text);
+    assert(loadConfigJson(path).config.warmDuringTools[0] === "gradle", "loader must read the supplied file");
+    parseConfigArgs("on", loadConfigJson(path).config);
+    assert(readFileSync(path, "utf8") === text, "runtime toggle must not write user configuration");
+    writeFileSync(path, '{"enabled":true,"toolWarmMaxProbes":-2}');
+    const broken = loadConfigJson(path);
+    assert(!broken.config.enabled && Boolean(broken.error), "invalid file must disable warming and report the error");
+  } finally {
+    rmSync(directory, {recursive: true, force: true});
+  }
 }
 
 console.log("provider.test.ts: all assertions passed");

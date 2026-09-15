@@ -12,7 +12,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { parseConfigArgs } from "./config.ts";
+import { loadConfigJson, parseConfigArgs } from "./config.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
@@ -57,11 +57,18 @@ export default function piWarmCache(pi: ExtensionAPI) {
   pi.registerFlag("warm-cache", {
     description: "Enable or configure pi-warm-cache (true/false or config tokens)",
     type: "string",
-    default: "true",
+    default: "",
   });
 
   pi.on("session_start", async (event, ctx) => {
     warmer.bindContext(ctx);
+
+    const loaded = loadConfigJson();
+    config = loaded.config;
+    if (loaded.error) {
+      if (ctx.hasUI) ctx.ui.notify(`pi-warm-cache disabled: ${loaded.error}`, "warning");
+      else process.stderr.write(`pi-warm-cache disabled: ${loaded.error}\n`);
+    }
 
     // Opt-in file diagnostics. Never default-write into the project cwd.
     const envDebug = process.env.PI_WARM_CACHE_DEBUG;
@@ -70,7 +77,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
     }
 
     const flag = pi.getFlag("warm-cache");
-    if (Object.prototype.toString.call(flag) === "[object String]") {
+    if (!loaded.error && Object.prototype.toString.call(flag) === "[object String]") {
       const value = String(flag);
       if (value === "false" || value === "0" || value === "off") {
         config = { ...config, enabled: false };

@@ -102,6 +102,35 @@ It does not help when:
 
 ## Configuration
 
+Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
+
+```json
+{
+  "enabled": false,
+  "warmDuringTools": ["gradle"],
+  "toolWarmMinRuntimeMs": 180000,
+  "toolWarmMaxProbes": 6,
+  "intervalMs": null,
+  "maxIdleWarmMs": 1800000
+}
+```
+
+Then use `/warm on` to enable warming with these settings and `/warm off`
+to disable it. These commands preserve your tool policy and do not rewrite
+the JSON file. With the example above, each new session starts disabled.
+Set `enabled` to `true` in the file to enable warming on startup instead.
+
+The file is read on `session_start` (including extension reload). Restart or
+reload Pi after editing it. Precedence: built-in defaults, JSON, environment
+debug flag, explicit `--warm-cache` tokens, then runtime `/warm` commands.
+An absent file retains built-in behavior; an invalid/unreadable file disables
+automatic warming and reports an error. Correct it and reload Pi.
+The extension does not create or modify this file automatically.
+
+JSON keys use the `WarmCacheConfig` field names in `src/types.ts`, not the
+command aliases below. Durations are numbers in milliseconds; unknown fields,
+invalid types and unsupported tool presets are rejected.
+
 Useful tokens for `/warm` and `--warm-cache`:
 
 | Token | Meaning | Default |
