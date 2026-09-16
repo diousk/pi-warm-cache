@@ -97,6 +97,12 @@ off, as do Copilot-compatible custom endpoints. Available Copilot models still
 depend on the user's Copilot plan and model policy. `/warm codex-on` applies
 only to the separate OpenAI Codex provider; it does not control Copilot timers.
 
+The built-in interval is **4 minutes** for eligible automatic warming routes.
+Saved custom intervals are preserved. Set `intervalMs` to `null` in the JSON
+configuration to use provider-specific automatic intervals instead. The TTL-based
+intervals described below apply in that automatic mode; retention and safety
+gates still take precedence over an interval setting.
+
 Copilot Responses/Completions use a **best-effort 4-minute probe interval** by
 default (an explicit `intervalMs` overrides it). This is not a guaranteed TTL,
 including for non-OpenAI models served through OpenAI-compatible transports.
@@ -141,7 +147,7 @@ Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
   "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
   "toolWarmMaxProbes": 6,
-  "intervalMs": null,
+  "intervalMs": 240000,
   "maxIdleWarmMs": 1800000
 }
 ```
@@ -171,7 +177,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 |---|---|---|
 | `on` / `off` | Master switch | on |
 | `5m` / `1h` / `auto` | Anthropic cadence | auto |
-| `interval=` | Override probe delay | strategy default |
+| `interval=` | Override probe delay | 4 minutes |
 | `max=` | Max concurrent warm sessions | 3 |
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |

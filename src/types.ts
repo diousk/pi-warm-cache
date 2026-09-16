@@ -102,7 +102,7 @@ export interface WarmCacheConfig {
    * - auto: follow Pi cacheRetention / model support
    */
   anthropicTtl: AnthropicTtlMode;
-  /** Override keepalive interval in ms. Null = strategy default. */
+  /** Keepalive interval in ms. Default 4 minutes; null = strategy default. */
   intervalMs: number | null;
   /** Max sessions that may run concurrent warm pings in this process. */
   maxConcurrentWarmSessions: number;
@@ -153,7 +153,7 @@ export interface WarmCacheConfig {
 export const DEFAULT_CONFIG: WarmCacheConfig = {
   enabled: true,
   anthropicTtl: "auto",
-  intervalMs: null,
+  intervalMs: 4 * 60_000,
   maxConcurrentWarmSessions: 3,
   minCachedTokens: 512,
   maxConsecutiveFailures: 3,

@@ -49,6 +49,19 @@ export function resolveWarmNowFailure(args: {
   };
 }
 
+export function formatWarmSettings(config: WarmCacheConfig, api?: string): string {
+  const seconds = config.intervalMs === null ? null : Math.ceil(config.intervalMs / 1000);
+  const interval = seconds === null ? "auto (provider default)"
+    : seconds < 60 ? `${seconds}s`
+    : `${Math.floor(seconds / 60)}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
+  return [
+    `interval=${interval}`,
+    ...(api === "anthropic-messages" ? [`Anthropic TTL=${config.anthropicTtl}`] : []),
+    `concurrency=${config.maxConcurrentWarmSessions} (warming requests per Pi process)`,
+    `debug log=${config.logToFile ? "on" : "off"}`,
+  ].join(" · ");
+}
+
 export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
   const warmer = new SessionWarmer(pi);
   let config = { ...DEFAULT_CONFIG };
@@ -404,7 +417,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         return;
       }
 
-      if (config.anthropicTtl === "1h") {
+      if (config.anthropicTtl === "1h" && ctx.model?.api === "anthropic-messages") {
         ctx.ui.notify(
           "1h mode follows Pi's on-wire long TTL. This extension does not rewrite real turns. Set Pi cache retention to long if you want 1h caches.",
           "info",
@@ -413,7 +426,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
       const block = warmer.getAutoWarmBlockReason();
       ctx.ui.notify(
-        `pi-warm-cache${warmer.isXaiRoute() ? " xAI best-effort" : ""} on (ttl=${config.anthropicTtl}, interval=${config.intervalMs ?? "auto"}, max=${config.maxConcurrentWarmSessions}, log=${config.logToFile ? "on" : "off"}${block ? `, autoWarm=blocked` : ""})`,
+        `Cache warming on${warmer.isXaiRoute() ? " (xAI best-effort)" : ""} · ${formatWarmSettings(config, ctx.model?.api)}${block ? " · automatic warming blocked" : ""}`,
         "info",
       );
       warmer.reschedule();

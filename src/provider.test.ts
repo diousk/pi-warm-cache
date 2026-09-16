@@ -71,7 +71,7 @@ import {
   renderWaitingUi,
   renderWarmHitUi,
 } from "./ui.ts";
-import { resolveWarmNowFailure } from "./index.ts";
+import { formatWarmSettings, resolveWarmNowFailure } from "./index.ts";
 import {
   DEFAULT_CONFIG,
   type CacheAnchor,
@@ -5450,7 +5450,9 @@ function deepEqualExcept<Actual, Expected>(
   const on = parseConfigArgs("on", config);
   const off = parseConfigArgs("off", on);
   assert(on.enabled && !off.enabled && off.warmDuringTools[0] === "gradle", "toggle must preserve JSON policy");
-  assert(on.intervalMs === null, "omitted JSON values must inherit built-in defaults");
+  assert(on.intervalMs === 240_000, "omitted JSON values must inherit the four-minute default");
+  assert(parseConfigJson('{"intervalMs":null}').intervalMs === null, "explicit null must preserve provider automatic cadence");
+  assert(parseConfigJson('{"intervalMs":120000}').intervalMs === 120_000, "saved custom intervals must remain respected");
   for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":["browser"]}', '{"typo":true}', '{"__proto__":{}}']) {
     let rejected = false;
     try { parseConfigJson(bad); } catch { rejected = true; }
@@ -5701,6 +5703,15 @@ function deepEqualExcept<Actual, Expected>(
   } finally {
     warmer.dispose();
   }
+}
+
+{
+  const summary = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 240_000 }, "openai-codex-responses");
+  assert(summary === "interval=4m · concurrency=3 (warming requests per Pi process) · debug log=off", "Codex settings must use readable units and explain concurrency without Anthropic TTL");
+  assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 90_000 }).includes("interval=1m 30s"), "settings must avoid decimal minutes");
+  assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 15_000 }).includes("interval=15s"), "settings must support seconds");
+  const anthropic = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: null, logToFile: true }, "anthropic-messages");
+  assert(anthropic.includes("interval=auto (provider default)") && anthropic.includes("Anthropic TTL=auto") && anthropic.includes("debug log=on"), "automatic interval and Anthropic-only TTL must be explicit");
 }
 
 console.log("provider.test.ts: all assertions passed");
