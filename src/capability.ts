@@ -748,7 +748,12 @@ export function resolveProviderCapability<Payload = undefined>(
     }
     return capability(
       "verified",
-      `registered GitHub Copilot ${model.api} route on an official Copilot endpoint`,
+      `registered GitHub Copilot ${model.api} route; cache refresh is best effort, not live verified`,
+      false,
+      {
+        automaticWarm: !(OPENAI_COMPAT_APIS.has(model.api) &&
+          payloadObject(payload)?.prompt_cache_retention === "24h"),
+      },
     );
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "@diousk/pi-warm-cache",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Pi extension that keeps supported provider prompt caches warm during long idle gaps",
   "type": "module",
   "keywords": [

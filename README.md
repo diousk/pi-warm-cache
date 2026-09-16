@@ -93,6 +93,22 @@ off, as do Copilot-compatible custom endpoints. Available Copilot models still
 depend on the user's Copilot plan and model policy. `/warm codex-on` applies
 only to the separate OpenAI Codex provider; it does not control Copilot timers.
 
+Copilot Responses/Completions use a **best-effort 4-minute probe interval** by
+default (an explicit `intervalMs` overrides it). This is not a guaranteed TTL,
+including for non-OpenAI models served through OpenAI-compatible transports.
+If the captured request asks for `prompt_cache_retention: "24h"`, automatic
+probes are suppressed even with an interval override; this does not prove the
+gateway honored retention. Anthropic uses its captured cache markers (about
+4 minutes for short retention, 48 minutes for a 1-hour marker).
+
+Copilot support has unit-test coverage, **not live cache-refresh validation**.
+The internal `verified` route classification means registered replay eligibility,
+not a live-tested TTL or a guarantee of savings. Pi 0.85.1's normalized usage
+does not expose the Copilot SDK's `cacheExpiresAt`, so this extension does not
+schedule from that SDK field. Existing miss and spend safeguards still apply.
+See [Copilot SDK usage events](https://docs.github.com/en/copilot/how-tos/copilot-sdk/features/streaming-events)
+and [Microsoft's Copilot caching article](https://code.visualstudio.com/blogs/2026/06/17/improving-token-efficiency-in-github-copilot).
+
 xAI Grok 4.5 keepalive is best effort.
 The 4-minute cadence is not a provider TTL promise.
 If probes keep returning no cache read, warming stops until the next real turn.

@@ -388,6 +388,26 @@ export function resolveStrategy<Payload = undefined>(
     };
   }
 
+  // Copilot transport compatibility is not a provider TTL guarantee. Do not
+  // inherit the direct OpenAI 8-minute estimate, especially for Gemini/Kimi.
+  if (model?.provider === "github-copilot" &&
+      (model.api === "openai-responses" || model.api === "openai-completions")) {
+    const retained = payloadObject(payload)?.prompt_cache_retention === "24h";
+    return {
+      capability,
+      family,
+      cacheRetention: retained ? "long" : cacheRetention,
+      intervalMs: retained ? null : (config.intervalMs ?? 4 * 60_000),
+      ttlLabel: retained
+        ? "24h retention requested on the wire; automatic keepalive suppressed"
+        : "Copilot best-effort probe cadence (~4m); TTL unverified",
+      waitLabel: null,
+      automaticWarm: !retained,
+      manualProbe: false,
+      longTtlDegradedReason: null,
+    };
+  }
+
   if (family === "xai-best-effort" && payload !== undefined && !isSafeXaiReplayPayload(payload)) {
     return {
       capability,

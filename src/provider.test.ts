@@ -614,9 +614,18 @@ function deepEqualExcept<Actual, Expected>(
   );
   assert(
     copilotResponsesStrategy.family === "openai-implicit" &&
-      copilotResponsesStrategy.intervalMs === Math.floor(8 * 60_000 * 0.8),
-    "GitHub Copilot Responses should use the conservative OpenAI implicit cadence",
+      copilotResponsesStrategy.intervalMs === 4 * 60_000,
+    "GitHub Copilot Responses should use a four-minute best-effort cadence",
   );
+  assert(copilotResponsesStrategy.ttlLabel.includes("best-effort"),
+    "Copilot cadence must not promise a provider TTL");
+  assert(resolveStrategy(copilotResponses, { ...DEFAULT_CONFIG, intervalMs: 60_000 },
+    copilotResponsesPayload).intervalMs === 60_000, "Copilot respects explicit interval");
+  const retainedCopilot = resolveStrategy(copilotResponses,
+    { ...DEFAULT_CONFIG, intervalMs: 60_000 },
+    { ...copilotResponsesPayload, prompt_cache_retention: "24h" });
+  assert(!retainedCopilot.automaticWarm && !retainedCopilot.capability.automaticWarm &&
+    retainedCopilot.intervalMs === null, "24h request suppresses Copilot timer even with override");
   const copilotMissingKey = resolveProviderCapability(copilotResponses, {
     ...copilotResponsesPayload,
     prompt_cache_key: undefined,
@@ -634,6 +643,11 @@ function deepEqualExcept<Actual, Expected>(
     api: "openai-completions",
     baseUrl: "https://api.business.githubcopilot.com",
   });
+  assert(resolveStrategy(copilotCompletions, DEFAULT_CONFIG).intervalMs === 4 * 60_000,
+    "Copilot Completions uses best-effort four-minute cadence, not OpenAI TTL");
+  assert(!resolveStrategy(copilotCompletions, DEFAULT_CONFIG,
+    { messages: [], prompt_cache_retention: "24h" }).automaticWarm,
+    "Retained Copilot Completions suppresses automatic probes");
   assert(
     resolveProviderCapability(copilotCompletions, {
       model: "gemini-3.8-flash",
