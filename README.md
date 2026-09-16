@@ -138,6 +138,7 @@ Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
 {
   "enabled": false,
   "warmDuringTools": ["gradle"],
+  "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
   "toolWarmMaxProbes": 6,
   "intervalMs": null,
@@ -175,12 +176,14 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
 | `log` / `nolog` | Local JSONL log | off |
-| `tools=` | Allowlisted long-tool presets; currently `gradle`, or `off` | off |
-| `tools=all` | Opt into all tool names and commands (`warmAllTools: true` in JSON) | off |
+| `tools=` | Tool policy: `all`, `gradle`, or `off` | all |
+| `tools=all` | Allow all tool names and commands (`warmAllTools: true` in JSON) | on |
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
 
-To opt into **all tools**, add `"warmAllTools": true` to the JSON file.
+Warming during **all tools** is enabled by default (`"warmAllTools": true`).
+An existing saved `"warmAllTools": false` remains respected; use `/warm tools=all`
+to enable and save the new policy in an existing installation.
 This overrides the `warmDuringTools` allowlist, including for parallel tools.
 Use `/warm on` and `/warm off` as usual; the policy is preserved.
 Use `/warm tools=all`; `/warm tools=gradle`
@@ -192,8 +195,9 @@ The minimum runtime, probe count, idle cutoff, spend/route gates and payload
 revision fencing still apply. Tools must actually be executing; model
 generation alone is not eligible. This mode also includes browser, custom
 tools and subagents, which may themselves make network/model requests that
-the parent extension cannot observe. Enable it only if that wider scope is
-acceptable. The extension never executes tool calls returned by a warm probe.
+the parent extension cannot observe. Use `/warm tools=gradle` to narrow the policy
+or `/warm tools=off` to disable tool warming. The extension never executes tool
+calls returned by a warm probe.
 
 The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
 command with plain arguments, optionally prefixed by `cd android &&` (or
@@ -230,6 +234,10 @@ While the agent is working without an eligible tool-warming schedule, both the
 widget and status line show `Cache warming standby · Agent working`. Warming
 remains enabled and resumes automatically when eligible; cancelled countdowns
 are removed from both surfaces.
+During tools, standby explains why no refresh is scheduled: tool warming is off,
+a tool (including a parallel sibling) is not eligible, the tool refresh limit
+was reached, or the cache anchor changed. Changing `/warm tools=…` immediately
+re-evaluates running tools without resetting their start time or refresh count.
 After the first warming response, it shows `Cache hits: M · Misses: N` for
 warming requests only; request errors are reported separately. Estimated
 savings are omitted from the live widget and remain available in `/warm savings`.

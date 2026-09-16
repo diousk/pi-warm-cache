@@ -202,7 +202,7 @@ export function renderIdleUi(
   const xai = label === "xAI best-effort" || (label === null && (isXaiText(reason) || isXaiText(detail)));
   const title = `${xai ? "xAI best-effort · " : ""}Cache warming`;
   const state = reason === "disabled" ? "off"
-    : reason === "agent working" ? "standby · Agent working"
+    : reason === "agent working" ? `standby · ${detail ?? "Agent working"}`
     : reason.includes("prefix <") ? "Prompt too short for warming"
     : reason === "idle cutoff reached" ? "Paused after inactivity"
     : /waiting for (next|first)/i.test(reason) ? "Waiting for your next message"
@@ -211,7 +211,7 @@ export function renderIdleUi(
     const lines = [
       ctx.ui.theme.fg("dim", `⚡ ${title}${reason === "agent working" ? " " : " · "}${state}`),
     ];
-    if (detail && detail.length > 0) {
+    if (reason !== "agent working" && detail && detail.length > 0) {
       lines.push(ctx.ui.theme.fg("dim", compactUiText(detail)));
     }
     ctx.ui.setWidget(WIDGET_ID, lines.slice(0, 2));

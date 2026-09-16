@@ -5343,6 +5343,7 @@ function deepEqualExcept<Actual, Expected>(
     minCachedTokens: 10,
     intervalMs: 60_000,
     warmDuringTools: ["gradle"],
+    warmAllTools: false,
     toolWarmMinRuntimeMs: 0,
     toolWarmMaxProbes: 1,
   });
@@ -5412,7 +5413,7 @@ function deepEqualExcept<Actual, Expected>(
   });
   const warmer = new SessionWarmer(extensionApiFixture({getThinkingLevel: () => "off"}), stub);
   warmer.bindContext(ctx);
-  warmer.setConfig({...DEFAULT_CONFIG, warmDuringTools: ["gradle"], minCachedTokens: 10, toolWarmMinRuntimeMs: 0});
+  warmer.setConfig({...DEFAULT_CONFIG, warmAllTools: false, warmDuringTools: ["gradle"], minCachedTokens: 10, toolWarmMinRuntimeMs: 0});
   const payload = {model: "gpt-5.6", input: [{role: "user", content: "build"}], prompt_cache_key: "review-race"};
   warmer.onProviderRequestStart(payload, ctx);
   warmer.onAssistantMessageEnd(ctx);
@@ -5535,9 +5536,11 @@ function deepEqualExcept<Actual, Expected>(
   warmer.dispose();
 }
 
-// All-tools is explicit opt-in and only bypasses the name/command allowlist.
+// All-tools is the default and only bypasses the name/command allowlist.
 {
-  assert(!DEFAULT_CONFIG.warmAllTools, "all-tools must default off");
+  assert(DEFAULT_CONFIG.warmAllTools, "all-tools must default on");
+  assert(parseConfigJson('{}').warmAllTools, "omitted JSON policy must inherit all-tools");
+  assert(!parseConfigJson('{"warmAllTools":false}').warmAllTools, "explicit saved opt-out must remain respected");
   const config = parseConfigJson('{"enabled":false,"warmAllTools":true}');
   assert(parseConfigArgs("on", config).warmAllTools, "on must preserve all-tools JSON policy");
   assert(!parseConfigArgs("off", config).enabled && parseConfigArgs("off", config).warmAllTools,
@@ -5649,9 +5652,9 @@ function deepEqualExcept<Actual, Expected>(
   });
   const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "off" }));
   const payload = { model: "gpt-5.6", input: [], prompt_cache_key: "standby-ui" };
-  const standby = () => {
-    assert(widget?.[0] === "⚡ Cache warming standby · Agent working", "widget must replace cancelled countdown with standby");
-    assert(status === "Cache warming standby · Agent working", "status must agree with standby widget");
+  const standby = (reason = "Agent working") => {
+    assert(widget?.[0] === `⚡ Cache warming standby · ${reason}`, "widget must replace cancelled countdown with its standby reason");
+    assert(status === `Cache warming standby · ${reason}`, "status must agree with standby widget");
     assert(warmer.getStatusText().includes("nextDue=none"), "standby must have no scheduled refresh");
   };
   try {
@@ -5663,7 +5666,7 @@ function deepEqualExcept<Actual, Expected>(
     idle = false;
     warmer.onAgentStart(ctx);
     standby();
-    warmer.setConfig({ ...DEFAULT_CONFIG, warmDuringTools: ["gradle"] });
+    warmer.setConfig({ ...DEFAULT_CONFIG, warmAllTools: false, warmDuringTools: ["gradle"] });
     warmer.onProviderRequestStart(payload, ctx);
     standby();
     warmer.onAssistantMessageEnd(ctx);
@@ -5671,11 +5674,28 @@ function deepEqualExcept<Actual, Expected>(
     warmer.onToolExecutionStart({ toolCallId: "build", toolName: "bash", args: { command: "./gradlew build" } }, ctx);
     assert(status.includes("Next refresh in"), "eligible tool must restore countdown");
     warmer.onToolExecutionStart({ toolCallId: "other", toolName: "read", args: {} }, ctx);
-    standby();
+    standby("Parallel tool not eligible");
     warmer.onToolExecutionEnd({ toolCallId: "other" }, ctx);
     assert(status.includes("Next refresh in"), "remaining eligible tool must restore countdown");
     warmer.onToolExecutionEnd({ toolCallId: "build" }, ctx);
     standby();
+    warmer.setConfig({ ...DEFAULT_CONFIG, warmAllTools: false });
+    warmer.onToolExecutionStart({ toolCallId: "toggle", toolName: "bash", args: { command: "./gradlew test" } }, ctx);
+    standby("Tool warming off");
+    warmer.setConfig({ ...warmer.getConfig(), warmDuringTools: ["gradle"] });
+    assert(status.includes("Next refresh in"), "enabling Gradle must reclassify a running tool without restarting it");
+    const dueBeforeToggle = nextDueAtMs(warmer.getStatusText());
+    warmer.setConfig({ ...warmer.getConfig(), warmAllTools: true });
+    warmer.setConfig({ ...warmer.getConfig(), warmAllTools: false });
+    assert(status.includes("Next refresh in"), "switching all back to Gradle must keep a matching tool eligible");
+    assert(nextDueAtMs(warmer.getStatusText()) === dueBeforeToggle, "policy toggles must preserve tool start and refresh deadline");
+    warmer.onProviderRequestStart({ ...payload, input: [{ role: "user", content: "new request" }] }, ctx);
+    warmer.onAssistantMessageEnd(ctx);
+    warmer.reschedule();
+    standby("Cache anchor changed during tool execution");
+    warmer.setConfig({ ...warmer.getConfig(), warmAllTools: true });
+    standby("Cache anchor changed during tool execution");
+    warmer.onToolExecutionEnd({ toolCallId: "toggle" }, ctx);
     warmer.setConfig({ ...warmer.getConfig(), showWidget: false });
     assert(widget === undefined && status.includes("standby"), "hidden widget must stay hidden in standby");
   } finally {

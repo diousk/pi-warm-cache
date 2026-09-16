@@ -176,7 +176,7 @@ export type RescheduleOptions = {
 type RunningTool = {
   toolCallId: string;
   toolName: string;
-  preset: ToolWarmPreset | null;
+  args: ToolCommandArgs;
   startedAt: number;
   anchorRevision: number;
   payloadFingerprint: string | null;
@@ -1006,7 +1006,7 @@ export class SessionWarmer {
     this.runningTools.set(event.toolCallId, {
       toolCallId: event.toolCallId,
       toolName: event.toolName,
-      preset,
+      args: { command: toolCommand(event.args) ?? undefined },
       startedAt: Date.now(),
       anchorRevision: this.anchorRevision,
       payloadFingerprint: this.anchor?.payloadFingerprint ?? null,
@@ -1165,27 +1165,27 @@ export class SessionWarmer {
   }
 
   private canWarmDuringTool(): boolean {
-    if (
-      this.runningTools.size === 0 ||
-      this.providerRequestInFlight ||
-      this.toolWarmProbeCount >= this.config.toolWarmMaxProbes ||
-      !this.anchor ||
-      !this.lastPayload ||
-      !this.plan
-    ) {
-      return false;
-    }
+    return this.toolWarmStandbyReason() === null;
+  }
+
+  private toolWarmStandbyReason(): string | null {
+    if (this.runningTools.size === 0 || this.providerRequestInFlight) return "Agent working";
+    if (!this.config.warmAllTools && this.config.warmDuringTools.length === 0) return "Tool warming off";
+    if (this.toolWarmProbeCount >= this.config.toolWarmMaxProbes) return "Tool refresh limit reached";
+    if (!this.anchor || !this.lastPayload || !this.plan) return "Waiting for a fresh cache anchor";
     for (const tool of this.runningTools.values()) {
       if (
-        (!this.config.warmAllTools && (tool.preset === null ||
-        !this.config.warmDuringTools.includes(tool.preset))) ||
         tool.anchorRevision !== this.anchorRevision ||
         tool.payloadFingerprint !== this.anchor.payloadFingerprint
       ) {
-        return false;
+        return "Cache anchor changed during tool execution";
+      }
+      if (!this.config.warmAllTools &&
+          matchToolWarmPreset(tool.toolName, tool.args, this.config.warmDuringTools) === null) {
+        return this.runningTools.size > 1 ? "Parallel tool not eligible" : "Tool not eligible";
       }
     }
-    return true;
+    return null;
   }
 
   private syncToolWarmSchedule(ctx: ExtensionContext, reason: string): void {
@@ -1430,7 +1430,7 @@ export class SessionWarmer {
     } else if (this.autoWarmBlockReason) {
       this.showIdle(ctx, "auto-warm blocked", this.autoWarmBlockReason);
     } else {
-      this.showIdle(ctx, "agent working");
+      this.showIdle(ctx, "agent working", this.toolWarmStandbyReason() ?? "Agent working");
     }
   }
 
