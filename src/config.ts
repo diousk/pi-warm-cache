@@ -1,10 +1,25 @@
 import { DEFAULT_CONFIG, type ToolWarmPreset, type WarmCacheConfig } from "./types.ts";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 export function warmCacheConfigPath(): string {
   return join(homedir(), ".pi", "agent", "warm-cache.json");
+}
+
+/** Validate before atomically replacing the saved startup configuration. */
+export function saveConfigJson(config: WarmCacheConfig, path = warmCacheConfigPath()): void {
+  const serialized = `${JSON.stringify(config, null, 2)}\n`;
+  parseConfigJson(serialized);
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, serialized, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* Rename normally already removed the temporary file. */ }
+  }
 }
 
 /** Strict, atomic validation: a bad field never silently enables a default. */

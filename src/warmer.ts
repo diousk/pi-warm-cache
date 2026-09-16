@@ -2040,7 +2040,7 @@ export class SessionWarmer {
 
     const unverifiedProbe = anchor.capability.state === "unverified";
     if (ctx.hasUI && !unverifiedProbe) {
-      ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "warm ping · in flight"));
+      ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "Refreshing cache…"));
     }
     this.log({
       event: "warm_start",

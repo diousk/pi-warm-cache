@@ -1,7 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { formatDurationShort } from "./config.ts";
 import { bestEffortFamilyLabel } from "./provider.ts";
-import { formatSavingsLabel } from "./savings.ts";
 import type {
   CacheAnchor,
   ProviderCapability,
@@ -102,32 +100,24 @@ export function renderWaitingUi(
   if (!ctx.hasUI) return;
 
   const remainingMs = Math.max(0, nextDueAt - Date.now());
-  const waitLabel = formatDurationShort(remainingMs || plan.intervalMs || 0);
-  const tokens = formatStatusTokens(anchor.cachedTokens || anchor.promptTokens);
+  const waitLabel = formatDurationShort(remainingMs);
   const ratio = formatProbeRatio(anchor);
   const label = bestEffortFamilyLabel(plan.family);
-  const savings = formatSessionSavings(anchor, label);
   const waitDetail = deferral
     ? deferral.reason === "concurrency limit"
       ? `deferred - ${deferral.activeWarmSessions}/${deferral.maxConcurrentWarmSessions} slots used`
       : `deferred - ${formatDeferralStatus(deferral)}`
-    : `${savings} · extension probes ${ratio}`;
+    : ratio;
   // showWidget controls the editor widget only. The status line remains available
   // as the compact extension surface when the widget is hidden.
   const lines = [
     ctx.ui.theme.fg(
       "accent",
       label
-        ? `⚡ ${label} cache-warm wait · extension probe in ${waitLabel}`
-        : `⚡ Cache-warm wait · extension probe in ${waitLabel}`,
+        ? `⚡ ${label} · Cache warming active · Next refresh in ${waitLabel}`
+        : `⚡ Cache warming active · Next refresh in ${waitLabel}`,
     ),
-    ctx.ui.theme.fg(
-      "dim",
-      label
-        ? `${label} cadence · ~${tokens} prefix`
-        : `Inside ${plan.ttlLabel} · ~${tokens} prefix`,
-    ),
-    ctx.ui.theme.fg("warning", waitDetail),
+    ...(waitDetail ? [ctx.ui.theme.fg("dim", waitDetail)] : []),
   ];
 
   if (config.showWidget) {
@@ -139,9 +129,7 @@ export function renderWaitingUi(
     STATUS_ID,
     ctx.ui.theme.fg(
       "dim",
-      `${label ? `${label} ` : ""}warm ${waitLabel} · ${
-        deferral ? `deferred · ${formatDeferralStatus(deferral)}` : ratio
-      } · ~${formatStatusTokens(anchor.cachedTokens || anchor.promptTokens)}`,
+      `${label ? `${label} · ` : ""}Cache warming active · Next refresh in ${waitLabel}${waitDetail ? ` · ${waitDetail}` : ""}`,
     ),
   );
 }
@@ -167,17 +155,17 @@ export function renderWarmHitUi(
   const label = bestEffortFamilyLabel(plan.family);
   const nextLabel =
     label === "xAI best-effort"
-      ? `Next extension probe in ${plan.waitLabel ?? "n/a"} · no fixed xAI cache lifetime promised.`
+      ? `Next refresh in ${formatDurationShort(plan.intervalMs ?? 0)} · no fixed xAI cache lifetime promised.`
       : label !== null
-        ? `Next extension probe in ${plan.waitLabel ?? "n/a"} · no fixed cache lifetime promised.`
-        : `Next extension probe in ${plan.waitLabel ?? "n/a"} · ${plan.ttlLabel}`;
+        ? `Next refresh in ${formatDurationShort(plan.intervalMs ?? 0)} · no fixed cache lifetime promised.`
+        : `Next refresh in ${formatDurationShort(plan.intervalMs ?? 0)}`;
   const lines = [
     ctx.ui.theme.fg(
       "success",
-      `⚡ ${label ? `${label} cache warm` : "Cache warm"} · extension probe hit · ~${tokens}`,
+      `⚡ ${label ? `${label} · ` : ""}Cache refreshed · Cache hit · ~${tokens}`,
     ),
     ctx.ui.theme.fg("dim", nextLabel),
-    ctx.ui.theme.fg("warning", `${formatSessionSavings(anchor, label)} · extension probes ${ratio}`),
+    ...(ratio ? [ctx.ui.theme.fg("dim", ratio)] : []),
   ];
 
   if (config.showWidget) {
@@ -189,7 +177,7 @@ export function renderWarmHitUi(
     STATUS_ID,
     ctx.ui.theme.fg(
       "success",
-      `${label ? `${label} ` : ""}warm ${plan.waitLabel ?? "n/a"} · ${ratio} · ~${formatStatusTokens(cacheRead || anchor.cachedTokens)}`,
+      `${label ? `${label} · ` : ""}Cache refreshed · ${nextLabel}${ratio ? ` · ${ratio}` : ""}`,
     ),
   );
 }
@@ -212,10 +200,15 @@ export function renderIdleUi(
   if (!ctx.hasUI) return;
 
   const xai = label === "xAI best-effort" || (label === null && (isXaiText(reason) || isXaiText(detail)));
-  const title = xai ? "xAI best-effort cache-warm idle" : "Cache-warm idle";
+  const title = `${xai ? "xAI best-effort · " : ""}Cache warming`;
+  const state = reason === "disabled" ? "off"
+    : reason.includes("prefix <") ? "Prompt too short for warming"
+    : reason === "idle cutoff reached" ? "Paused after inactivity"
+    : /waiting for (next|first)/i.test(reason) ? "Waiting for your next message"
+    : `Paused · ${compactUiText(reason)}`;
   if (config.showWidget) {
     const lines = [
-      ctx.ui.theme.fg("dim", `⚡ ${title} · ${compactUiText(reason)}`),
+      ctx.ui.theme.fg("dim", `⚡ ${title} · ${state}`),
     ];
     if (detail && detail.length > 0) {
       lines.push(ctx.ui.theme.fg("dim", compactUiText(detail)));
@@ -227,7 +220,7 @@ export function renderIdleUi(
 
   ctx.ui.setStatus(
     STATUS_ID,
-    ctx.ui.theme.fg("dim", `${xai ? "xAI best-effort " : ""}warm · idle · ${compactUiText(reason, 48)}`),
+    ctx.ui.theme.fg("dim", `${title} · ${state}`),
   );
 }
 
@@ -273,8 +266,8 @@ export function renderProbeRetryUi(
   const xai = label === "xAI best-effort" || (label === null && isXaiText(detail));
   const retryLine =
     nextDueAt !== undefined && nextDueAt > Date.now()
-      ? `Next extension probe in ${formatDurationShort(nextDueAt - Date.now())}.`
-      : "Retrying the extension probe.";
+      ? `Next refresh in ${formatDurationShort(nextDueAt - Date.now())}.`
+      : "Retrying cache refresh.";
   if (config.showWidget) {
     ctx.ui.setWidget(WIDGET_ID, [
       ctx.ui.theme.fg(
@@ -308,7 +301,7 @@ export function renderFailureUi(
   const retryLine = blocked
     ? `${xai ? "xAI best-effort auto-warm stays off" : "Auto-warm stays off"} until /warm resume.`
     : nextDueAt !== undefined && nextDueAt > Date.now()
-      ? `Next extension probe in ${formatDurationShort(nextDueAt - Date.now())}.`
+      ? `Next refresh in ${formatDurationShort(nextDueAt - Date.now())}.`
       : "Warming stopped until the next real turn or /warm now.";
   const error = /error|failed|no model/i.test(reason);
   const title = error ? "Cache-warm error" : "Cache-warm warning";
@@ -337,16 +330,16 @@ export function renderFailureUi(
   );
 }
 
-function formatSessionSavings(anchor: CacheAnchor, label: string | null): string {
-  const prefix = label ? `${label} session` : "Session";
-  return anchor.savingsKnown
-    ? `${prefix} ${formatSavingsLabel(anchor)}`
-    : `${prefix} savings ${formatSavingsLabel(anchor)}`;
+function formatDurationShort(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return minutes > 0 ? `${minutes}m${remainder ? ` ${remainder}s` : ""}` : `${seconds}s`;
 }
 
 function formatProbeRatio(anchor: Pick<CacheAnchor, "probeHitCount" | "probeMissCount">): string {
   const total = anchor.probeHitCount + anchor.probeMissCount;
-  return `${anchor.probeHitCount}/${total}`;
+  return total > 0 ? `Cache hits: ${anchor.probeHitCount} · Misses: ${anchor.probeMissCount}` : "";
 }
 
 function formatStatusTokens(tokens: number): string {

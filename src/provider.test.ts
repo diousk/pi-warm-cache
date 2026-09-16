@@ -58,7 +58,7 @@ import {
   formatSavingsSummary,
   resolveModelPricing,
 } from "./savings.ts";
-import { loadConfigJson, parseConfigJson, parseConfigArgs } from "./config.ts";
+import { loadConfigJson, parseConfigJson, parseConfigArgs, saveConfigJson } from "./config.ts";
 import piWarmCache from "./index.ts";
 import { matchToolWarmPreset, resetProbeSpendLedgerForTest, SessionWarmer } from "./warmer.ts";
 import {
@@ -3526,7 +3526,7 @@ function deepEqualExcept<Actual, Expected>(
       warmHandler = command.handler;
     },
   });
-  piWarmCache(pi);
+  piWarmCache(pi, () => {});
   assert(warmHandler !== undefined, "warm command should be registered");
   const ctx = contextFixture({
     model: modelFixture({
@@ -3810,7 +3810,7 @@ function deepEqualExcept<Actual, Expected>(
     "re-anchoring status should be concise",
   );
   assert(
-    statuses.some((status) => /warm [0-9.]+m · 2\/2 · ~128k/.test(status)),
+    statuses.some((status) => status.includes("Cache hits: 2 · Misses: 0")),
     "healthy status should show cadence, probe ratio, and prompt size",
   );
 
@@ -3835,7 +3835,7 @@ function deepEqualExcept<Actual, Expected>(
     "waiting widget should show the gate deferral and occupied slots",
   );
   assert(
-    deferredStatus.includes("deferred · concurrency limit (2/3 slots used)"),
+    deferredStatus.includes("deferred - 2/3 slots used"),
     "waiting status should show the gate deferral and occupied slots",
   );
 
@@ -5053,23 +5053,23 @@ function deepEqualExcept<Actual, Expected>(
     .filter((call) => call.kind === "widget" && Array.isArray(call.value))
     .map((call) => call.value);
   assert(
-    goWidgets[0]![0] === "⚡ OpenCode Go best-effort cache-warm wait · extension probe in 4m",
+    goWidgets[0]![0] === "⚡ OpenCode Go best-effort · Cache warming active · Next refresh in 0s",
     "Go waiting L1 must use the Go label with lowercase cache-warm",
   );
   assert(
-    goWidgets[0]![1] === "OpenCode Go best-effort cadence · ~128k prefix",
+    goWidgets[0]![1] === "Cache hits: 2 · Misses: 0",
     "Go waiting L2 must use the Go label cadence line",
   );
   assert(
-    goWidgets[0]![2].includes("OpenCode Go best-effort session est. $0.12 saved"),
-    "Go savings prefix must join the label with ' session'",
+    !String(goWidgets[0]).includes("saved"),
+    "Go widget must omit estimated savings",
   );
   assert(
-    goWidgets[1]![0] === "⚡ OpenCode Go best-effort cache warm · extension probe hit · ~128k",
+    goWidgets[1]![0] === "⚡ OpenCode Go best-effort · Cache refreshed · Cache hit · ~128k",
     "Go hit L1 must use the Go label",
   );
   assert(
-    goWidgets[1]![1] === "Next extension probe in 4m · no fixed cache lifetime promised.",
+    goWidgets[1]![1] === "Next refresh in 4m · no fixed cache lifetime promised.",
     "Go hit L2 must avoid the xAI lifetime wording",
   );
   const goUiText = goUiCalls
@@ -5081,7 +5081,7 @@ function deepEqualExcept<Actual, Expected>(
     .filter((call) => call.kind === "status")
     .map((call) => String(call.value));
   assert(
-    goStatus.some((status) => status.startsWith("OpenCode Go best-effort warm 4m ·")),
+    goStatus.some((status) => status.startsWith("OpenCode Go best-effort · Cache warming active")),
     "Go status must carry the Go label prefix",
   );
 
@@ -5108,30 +5108,30 @@ function deepEqualExcept<Actual, Expected>(
     call.kind === "widget" && Array.isArray(call.value) ? [call.value] : [],
   );
   assert(
-    xaiPinWidgets[0]![0] === "⚡ xAI best-effort cache-warm wait · extension probe in 4m",
+    xaiPinWidgets[0]![0] === "⚡ xAI best-effort · Cache warming active · Next refresh in 0s",
     "xai waiting L1 must stay byte-identical",
   );
   assert(
-    xaiPinWidgets[0]![1] === "xAI best-effort cadence · ~128k prefix",
+    xaiPinWidgets[0]![1] === "Cache hits: 2 · Misses: 0",
     "xai waiting L2 must stay byte-identical",
   );
   assert(
-    xaiPinWidgets[0]![2].includes("xAI best-effort session est. $0.12 saved"),
-    "xai savings prefix must stay byte-identical",
+    !xaiPinWidgets[0]!.join(" ").includes("saved"),
+    "xAI widget must omit estimated savings",
   );
   assert(
-    xaiPinWidgets[1]![0] === "⚡ xAI best-effort cache warm · extension probe hit · ~128k",
+    xaiPinWidgets[1]![0] === "⚡ xAI best-effort · Cache refreshed · Cache hit · ~128k",
     "xai hit L1 must stay byte-identical",
   );
   assert(
-    xaiPinWidgets[1]![1] === "Next extension probe in 4m · no fixed xAI cache lifetime promised.",
+    xaiPinWidgets[1]![1] === "Next refresh in 4m · no fixed xAI cache lifetime promised.",
     "xai hit L2 must keep its exact wording",
   );
   const xaiPinStatus = xaiPinCalls
     .filter((call) => call.kind === "status")
     .map((call) => String(call.value));
   assert(
-    xaiPinStatus.some((status) => status.startsWith("xAI best-effort warm 4m ·")),
+    xaiPinStatus.some((status) => status.startsWith("xAI best-effort · Cache warming active")),
     "xai status must stay byte-identical",
   );
 
@@ -5584,17 +5584,19 @@ function deepEqualExcept<Actual, Expected>(
 // Read-only config/status commands work while disabled and preserve overrides.
 {
   const notices: string[] = [];
+  const savedConfigs: string[] = [];
   let handler: ((args: string, ctx: ExtensionContext) => Promise<void>) | undefined;
   piWarmCache(extensionApiFixture({
     registerFlag() {}, on() {},
     registerCommand: (_: string, command: {handler: (args: string, ctx: ExtensionContext) => Promise<void>}) => { handler = command.handler; },
-  }));
+  }), (config) => { savedConfigs.push(JSON.stringify(config)); });
   assert(handler !== undefined, "warm command must be registered");
   const ctx = contextFixture({
     hasUI: true, isIdle: () => false,
     ui: {notify: (s: string) => notices.push(s), setStatus() {}, setWidget() {}, theme: {fg: (_: string, s: string) => s}},
   });
   await handler("off tools=all toolmax=4", ctx);
+  assert(savedConfigs.length === 1 && JSON.parse(savedConfigs[0]!).warmAllTools === true, "settings commands must persist their effective configuration");
   notices.length = 0;
   await handler("config", ctx);
   const currentConfig = notices.at(-1)!;
@@ -5612,6 +5614,22 @@ function deepEqualExcept<Actual, Expected>(
   await handler(" STATUS ", ctx);
   assert(notices.at(-1) === stat, "inspection must not change counters or lifecycle");
   assert(notices.length === 6, "each read command must emit exactly one response");
+  assert(savedConfigs.length === 1, "read-only commands must not save settings");
+  await handler("unknown-option", ctx);
+  assert(savedConfigs.length === 1, "unknown options must not overwrite saved settings");
+}
+
+{
+  const directory = mkdtempSync(join(tmpdir(), "warm-config-save-"));
+  const path = join(directory, "agent", "warm-cache.json");
+  try {
+    saveConfigJson({ ...DEFAULT_CONFIG, warmAllTools: true, enabled: false }, path);
+    assert(loadConfigJson(path).config.warmAllTools, "saved configuration must round-trip");
+    saveConfigJson({ ...DEFAULT_CONFIG, intervalMs: 120000 }, path);
+    assert(loadConfigJson(path).config.intervalMs === 120000, "saving must replace the previous configuration");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 console.log("provider.test.ts: all assertions passed");

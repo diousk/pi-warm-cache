@@ -12,7 +12,8 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadConfigJson, parseConfigArgs, warmCacheConfigPath } from "./config.ts";
+import { loadConfigJson, parseConfigArgs, saveConfigJson, warmCacheConfigPath } from "./config.ts";
+import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
@@ -48,7 +49,7 @@ export function resolveWarmNowFailure(args: {
   };
 }
 
-export default function piWarmCache(pi: ExtensionAPI) {
+export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
   const warmer = new SessionWarmer(pi);
   let config = { ...DEFAULT_CONFIG };
   let lastCapabilityNoticeKey: string | null = null;
@@ -182,6 +183,44 @@ export default function piWarmCache(pi: ExtensionAPI) {
   });
 
   pi.registerCommand("warm", {
+    getArgumentCompletions: (prefix) => {
+      const options = [
+        ["status", "Show warming status and statistics"],
+        ["config", "Show current settings"],
+        ["on", "Enable automatic warming"],
+        ["off", "Disable automatic warming"],
+        ["now", "Refresh cache once"],
+        ["resume", "Clear the automatic warming block"],
+        ["tools=gradle", "Warm during long Gradle builds"],
+        ["tools=all", "Warm during any long tool execution"],
+        ["tools=off", "Warm only between agent turns"],
+        ["toolmin=3m", "Wait 3 minutes before warming during tools"],
+        ["toolmax=6", "Allow up to 6 refreshes per tool batch"],
+        ["interval=4m", "Set refresh interval (editable duration)"],
+        ["maxidle=30m", "Stop after 30 minutes without a real turn"],
+        ["spend=1", "Set warming spend ceiling to $1"],
+        ["max=3", "Allow 3 concurrent warming sessions"],
+        ["auto", "Follow the provider's cache retention"],
+        ["5m", "Use short Anthropic cadence"],
+        ["1h", "Follow existing 1-hour Anthropic retention"],
+        ["codex-on", "Enable Codex automatic warming"],
+        ["codex-off", "Disable Codex automatic warming"],
+        ["log", "Enable local diagnostic logging"],
+        ["nolog", "Disable local diagnostic logging"],
+        ["widget", "Show the warming widget"],
+        ["nowidget", "Hide the warming widget"],
+        ["savings", "Show estimated savings details"],
+      ];
+      const standalone = new Set(["status", "config", "now", "savings"]);
+      const split = prefix.lastIndexOf(" ");
+      const preceding = prefix.slice(0, split + 1);
+      const query = prefix.slice(split + 1).toLowerCase();
+      if (preceding.trim().split(/\s+/).some((token) => standalone.has(token.toLowerCase()))) return null;
+      const items = options
+        .filter(([value]) => value!.startsWith(query) && (!preceding || !standalone.has(value!)))
+        .map(([value, description]) => ({ value: preceding + value, label: value!, description }));
+      return items.length > 0 ? items : null;
+    },
     description:
       "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6]",
     handler: async (args, ctx) => {
@@ -208,7 +247,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
         ctx.ui.notify(warmer.getStatusText(), "info");
         return;
       }
-      if (trimmed === "now") {
+      if (trimmed.toLowerCase() === "now") {
         if (!ctx.isIdle()) {
           ctx.ui.notify("Agent is busy. Try /warm now when idle.", "warning");
           return;
@@ -302,6 +341,20 @@ export default function piWarmCache(pi: ExtensionAPI) {
       }
 
       const lower = trimmed.toLowerCase();
+      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
+      const unknown = lower.split(/\s+/).find((token) => !knownTokens.test(token));
+      if (unknown) {
+        ctx.ui.notify(`Unknown option: ${unknown}. Type /warm followed by a space to see available options.`, "warning");
+        return;
+      }
+      const persistConfig = () => {
+        try {
+          saveConfig(config);
+          ctx.ui.notify(`Settings saved to ${warmCacheConfigPath()}`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Settings apply to this session only; could not save ${warmCacheConfigPath()}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        }
+      };
       const resumeRequested =
         lower === "resume" ||
         lower === "on" ||
@@ -326,6 +379,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
           warmer.clearAutoWarmBlock("user /warm codex-on");
         }
         warmer.setConfig(config);
+        persistConfig();
         ctx.ui.notify(
           lower === "codex-on"
             ? "Codex auto-warm enabled (OK-suffix path). Sticky block still applies if out is huge."
@@ -342,6 +396,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
         warmer.clearAutoWarmBlock("user /warm on");
       }
       warmer.setConfig(config);
+      persistConfig();
 
       if (!config.enabled) {
         clearWarmUi(ctx);

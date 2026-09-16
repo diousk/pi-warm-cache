@@ -32,6 +32,10 @@ Restart or reload Pi after install.
 
 ## Commands
 
+Type `/warm ` (with a trailing space) to see the available commands and settings
+with descriptions. Keep typing to filter the menu; duration and limit suggestions
+can be edited before submitting.
+
 ```text
 /warm                  # show status and savings
 /warm config           # show effective runtime configuration and JSON file path
@@ -142,16 +146,19 @@ Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
 ```
 
 Then use `/warm on` to enable warming with these settings and `/warm off`
-to disable it. These commands preserve your tool policy and do not rewrite
-the JSON file. With the example above, each new session starts disabled.
-Set `enabled` to `true` in the file to enable warming on startup instead.
+to disable it. Settings commands preserve your tool policy and automatically
+save the complete effective configuration to this file, including current CLI
+and environment overrides. New sessions and subagents that load this extension
+use the saved defaults; already-running sessions keep their current settings.
 
 The file is read on `session_start` (including extension reload). Restart or
 reload Pi after editing it. Precedence: built-in defaults, JSON, environment
 debug flag, explicit `--warm-cache` tokens, then runtime `/warm` commands.
 An absent file retains built-in behavior; an invalid/unreadable file disables
 automatic warming and reports an error. Correct it and reload Pi.
-The extension does not create or modify this file automatically.
+Settings commands create the file if needed and replace it atomically. A save
+failure reports a warning and keeps the change active for the current session.
+Status/config/savings queries, `/warm now`, and `/warm resume` do not write the file.
 
 JSON keys use the `WarmCacheConfig` field names in `src/types.ts`, not the
 command aliases below. Durations are numbers in milliseconds; unknown fields,
@@ -176,7 +183,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 To opt into **all tools**, add `"warmAllTools": true` to the JSON file.
 This overrides the `warmDuringTools` allowlist, including for parallel tools.
 Use `/warm on` and `/warm off` as usual; the policy is preserved.
-For a runtime-only override use `/warm tools=all`; `/warm tools=gradle`
+Use `/warm tools=all`; `/warm tools=gradle`
 returns to Gradle-only and `/warm tools=off` disables tool warming but leaves
 idle warming enabled if the master switch is on. All-tools mode does not
 itself enable the master switch.
@@ -216,6 +223,12 @@ estimated savings, failure/deferral state and the last attempt. These commands
 do not toggle warming, reset counters, change timers or send a probe.
 
 `/warm` shows whether warming is active, the current route, the next probe time, and a savings summary.
+
+The live widget shows `Cache warming active` and an integer minutes/seconds
+countdown such as `Next refresh in 2m 45s`, updated every 15 seconds.
+After the first warming response, it shows `Cache hits: M · Misses: N` for
+warming requests only; request errors are reported separately. Estimated
+savings are omitted from the live widget and remain available in `/warm savings`.
 
 `probeHits` and `probeMisses` count extension probes only, not your real turns.
 
