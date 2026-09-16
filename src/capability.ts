@@ -45,10 +45,20 @@ export function payloadObject<Value>(value: Value): PayloadObject | null {
 }
 
 const OPENAI_COMPAT_APIS = new Set(["openai-responses", "openai-completions"]);
+const GITHUB_COPILOT_APIS = new Set([
+  "anthropic-messages",
+  "openai-responses",
+  "openai-completions",
+]);
 const XAI_PROBE_APIS = new Set(["openai-responses", "openai-completions"]);
 const XAI_BEST_EFFORT_MODEL_IDS = new Set(["grok-4.5"]);
 const ANTHROPIC_FIRST_PARTY_HOSTS = new Set(["api.anthropic.com"]);
 const OPENAI_FIRST_PARTY_HOSTS = new Set(["api.openai.com"]);
+const GITHUB_COPILOT_HOSTS = new Set([
+  "api.individual.githubcopilot.com",
+  "api.business.githubcopilot.com",
+  "api.enterprise.githubcopilot.com",
+]);
 const XAI_FIRST_PARTY_HOSTS = new Set(["api.x.ai"]);
 
 /** Payload shapes a registered proxy transport can legally carry. */
@@ -697,6 +707,50 @@ export function resolveProviderCapability<Payload = undefined>(
   // proxy cannot become verified merely by copying first-party metadata.
   const proxyRoute = resolveProxyRouteCapability(model, payload);
   if (proxyRoute) return proxyRoute;
+
+  // GitHub Copilot is a registered mixed-API provider. Its built-in models
+  // use Anthropic Messages, OpenAI Responses, or OpenAI Completions while
+  // authentication may resolve the account-specific endpoint at request time.
+  // The catalog endpoint must still be an official Copilot host so a custom
+  // provider cannot inherit this strategy by copying the provider id.
+  if (model.provider === "github-copilot") {
+    if (!GITHUB_COPILOT_APIS.has(model.api)) {
+      return capability(
+        "unsupported",
+        `GitHub Copilot API ${model.api || "unknown"} is not registered for cache warming`,
+      );
+    }
+    if (!hasExplicitFirstPartyBaseUrl(model, GITHUB_COPILOT_HOSTS)) {
+      return capability(
+        "unsupported",
+        "GitHub Copilot warming requires an official api.*.githubcopilot.com catalog endpoint",
+      );
+    }
+    if (
+      payload !== undefined &&
+      model.api === "openai-responses" &&
+      !hasStableResponsesCacheKey(payload)
+    ) {
+      return capability(
+        "unverified",
+        "GitHub Copilot Responses warming requires a stable prompt_cache_key; automatic and manual warming are disabled for this payload",
+      );
+    }
+    if (
+      payload !== undefined &&
+      model.api === "anthropic-messages" &&
+      !payloadHasCacheControl(payload)
+    ) {
+      return capability(
+        "unverified",
+        "GitHub Copilot Anthropic warming requires cache_control markers in the captured payload; automatic and manual warming are disabled for this payload",
+      );
+    }
+    return capability(
+      "verified",
+      `registered GitHub Copilot ${model.api} route on an official Copilot endpoint`,
+    );
+  }
 
   // Anthropic-compatible routes are verified only when the route metadata says
   // that Anthropic cache markers are emitted, or when the provider is first-party.

@@ -586,6 +586,111 @@ function deepEqualExcept<Actual, Expected>(
     "OpenAI endpoint rejection must identify the incorrect baseUrl",
   );
 
+  const copilotResponses = modelFixture({
+    id: "gpt-5.6-luna",
+    provider: "github-copilot",
+    api: "openai-responses",
+    baseUrl: "https://api.individual.githubcopilot.com",
+  });
+  const copilotResponsesPayload = {
+    model: "gpt-5.6-luna",
+    input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    prompt_cache_key: "copilot-session-1",
+    store: false,
+  };
+  const copilotResponsesCapability = resolveProviderCapability(
+    copilotResponses,
+    copilotResponsesPayload,
+  );
+  assert(
+    copilotResponsesCapability.state === "verified" &&
+      copilotResponsesCapability.automaticWarm,
+    "keyed GitHub Copilot Responses should support automatic warming",
+  );
+  const copilotResponsesStrategy = resolveStrategy(
+    copilotResponses,
+    DEFAULT_CONFIG,
+    copilotResponsesPayload,
+  );
+  assert(
+    copilotResponsesStrategy.family === "openai-implicit" &&
+      copilotResponsesStrategy.intervalMs === Math.floor(8 * 60_000 * 0.8),
+    "GitHub Copilot Responses should use the conservative OpenAI implicit cadence",
+  );
+  const copilotMissingKey = resolveProviderCapability(copilotResponses, {
+    ...copilotResponsesPayload,
+    prompt_cache_key: undefined,
+  });
+  assert(
+    copilotMissingKey.state === "unverified" &&
+      !copilotMissingKey.automaticWarm &&
+      !copilotMissingKey.manualProbe,
+    "GitHub Copilot Responses must fail closed without a stable cache key",
+  );
+
+  const copilotCompletions = modelFixture({
+    id: "gemini-3.8-flash",
+    provider: "github-copilot",
+    api: "openai-completions",
+    baseUrl: "https://api.business.githubcopilot.com",
+  });
+  assert(
+    resolveProviderCapability(copilotCompletions, {
+      model: "gemini-3.8-flash",
+      messages: [{ role: "user", content: "hi" }],
+    }).state === "verified",
+    "GitHub Copilot Completions should be verified on an official business endpoint",
+  );
+  assert(
+    resolveStrategy(copilotCompletions, DEFAULT_CONFIG).family === "openai-implicit",
+    "GitHub Copilot Completions should use the conservative OpenAI implicit family",
+  );
+
+  const copilotAnthropic = modelFixture({
+    id: "claude-sonnet-5",
+    provider: "github-copilot",
+    api: "anthropic-messages",
+    baseUrl: "https://api.enterprise.githubcopilot.com",
+  });
+  const copilotAnthropicPayload = {
+    model: "claude-sonnet-5",
+    system: [{ type: "text", text: "system", cache_control: { type: "ephemeral" } }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  };
+  assert(
+    resolveProviderCapability(copilotAnthropic, copilotAnthropicPayload).state === "verified",
+    "GitHub Copilot Anthropic should be verified when the captured body has cache markers",
+  );
+  assert(
+    resolveStrategy(copilotAnthropic, DEFAULT_CONFIG, copilotAnthropicPayload).family ===
+      "anthropic-short",
+    "GitHub Copilot Anthropic should follow its on-wire short cache markers",
+  );
+  const copilotAnthropicWithoutMarkers = resolveProviderCapability(copilotAnthropic, {
+    model: "claude-sonnet-5",
+    system: [{ type: "text", text: "system" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+  });
+  assert(
+    copilotAnthropicWithoutMarkers.state === "unverified" &&
+      !copilotAnthropicWithoutMarkers.manualProbe,
+    "GitHub Copilot Anthropic must fail closed when the body has no cache markers",
+  );
+  assert(
+    resolveProviderCapability(modelFixture({
+      ...copilotResponses,
+      baseUrl: "https://copilot-proxy.example/v1",
+    })).state === "unsupported",
+    "GitHub Copilot models on an unregistered endpoint must fail closed",
+  );
+  assert(
+    resolveProviderCapability(modelFixture({
+      ...copilotResponses,
+      api: "openai-codex-responses",
+    })).state === "unsupported",
+    "GitHub Copilot must reject unregistered API transports",
+  );
+
   const directXai = modelFixture({
     id: "grok-4.5",
     provider: "xai",
@@ -5350,6 +5455,70 @@ function deepEqualExcept<Actual, Expected>(
   } finally {
     rmSync(directory, {recursive: true, force: true});
   }
+}
+
+// GitHub Copilot Responses replays the captured keyed body through the normal
+// OpenAI Responses output floor without taking the separate Codex suffix path.
+{
+  const copilotModel = modelFixture({
+    id: "gpt-5.6-luna",
+    provider: "github-copilot",
+    api: "openai-responses",
+    baseUrl: "https://api.individual.githubcopilot.com",
+    cost: { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1.2 },
+  });
+  const captured = {
+    model: "gpt-5.6-luna",
+    input: [{ role: "user", content: [{ type: "input_text", text: "keep exact" }] }],
+    prompt_cache_key: "copilot-runtime-session",
+    max_output_tokens: 4096,
+    store: false,
+  };
+  const replayed: Array<ReturnType<typeof payloadObject>> = [];
+  const completeStub = completeFixture(async (
+    _model: Model<any>,
+    _context: WarmCompleteContext,
+    options?: ProbeRequestOptions,
+  ) => {
+    replayed.push(payloadObject(options?.onPayload?.({ model: copilotModel.id, input: [] }, copilotModel)));
+    return {
+      stopReason: "stop" as const,
+      usage: { input: 0, output: 1, cacheRead: 100, cacheWrite: 0, cost: { total: 0.001 } },
+    };
+  });
+  const ctx = contextFixture({
+    cwd: process.cwd(),
+    model: copilotModel,
+    hasUI: false,
+    isIdle: () => true,
+    thinkingLevel: "off",
+    sessionManager: { getSessionId: () => "copilot-runtime-session" },
+    ui: { setStatus() {}, setWidget() {}, theme: { fg: (_: string, s: string) => s } },
+  });
+  const warmer = new SessionWarmer(
+    extensionApiFixture({ getThinkingLevel: () => "off" }),
+    completeStub,
+  );
+  warmer.bindContext(ctx);
+  warmer.setConfig({ ...DEFAULT_CONFIG, minCachedTokens: 10, intervalMs: 60_000 });
+  warmer.capturePayload(captured, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  const result = await runTimerWarm(warmer);
+  assert(result.ok && result.cacheHit, "GitHub Copilot Responses timer probe should hit");
+  assert(replayed.length === 1, "GitHub Copilot timer should send exactly one probe");
+  assert(
+    replayed[0]?.prompt_cache_key === captured.prompt_cache_key,
+    "GitHub Copilot probe must preserve the captured cache key",
+  );
+  assert(
+    replayed[0]?.max_output_tokens === OPENAI_RESPONSES_MIN_OUTPUT_TOKENS,
+    "GitHub Copilot Responses must use the legal minimum output cap",
+  );
+  assert(
+    JSON.stringify(replayed[0]?.input) === JSON.stringify(captured.input),
+    "GitHub Copilot must replay the exact input without a Codex warm suffix",
+  );
+  warmer.dispose();
 }
 
 // All-tools is explicit opt-in and only bypasses the name/command allowlist.

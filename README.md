@@ -70,6 +70,7 @@ Automatic keepalive is on for these registered routes:
 | OpenAI | Probe on the explicit or implicit cache window for that model |
 | Azure OpenAI | Same OpenAI response strategy |
 | OpenAI Codex | Codex timer policy; turn it off with `/warm codex-off` if output spikes |
+| GitHub Copilot | Automatic warming for keyed Responses, Completions, and Anthropic models whose captured request contains cache markers |
 | xAI Grok 4.5 | Best-effort probe about every 4 minutes when the request has a stable cache key |
 | OpenCode Go (default setup) | Keepalive on short Anthropic and keyed Responses routes; no timer on Completions because that cache already lasts a long time |
 
@@ -84,6 +85,13 @@ These routes allow `/warm now` only:
 
 Unlisted proxies and other compatible APIs stay off.
 The extension will not call the provider for those routes.
+
+GitHub Copilot is registered as its own mixed-API provider. Responses models
+must have a stable `prompt_cache_key`; Anthropic models must have on-wire
+`cache_control` markers. Copilot models that fail either payload gate remain
+off, as do Copilot-compatible custom endpoints. Available Copilot models still
+depend on the user's Copilot plan and model policy. `/warm codex-on` applies
+only to the separate OpenAI Codex provider; it does not control Copilot timers.
 
 xAI Grok 4.5 keepalive is best effort.
 The 4-minute cadence is not a provider TTL promise.
