@@ -25,7 +25,7 @@ If those prices are missing, the status shows `n/a`.
 ## Install
 
 ```bash
-pi install git:github.com/diousk/pi-warm-cache
+pi install npm:@diousk/pi-warm-cache
 ```
 
 Restart or reload Pi after install.
