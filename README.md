@@ -7,7 +7,7 @@ That cache expires if you leave the session idle.
 The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
-It requires [Pi](https://github.com/badlogic/pi-mono) 0.84 or newer.
+It requires [Pi](https://github.com/badlogic/pi-mono) 0.85.1 or newer.
 
 ## How it works
 
@@ -25,7 +25,7 @@ If those prices are missing, the status shows `n/a`.
 ## Install
 
 ```bash
-pi install npm:pi-warm-cache
+pi install git:github.com/diousk/pi-warm-cache
 ```
 
 Restart or reload Pi after install.
@@ -34,6 +34,8 @@ Restart or reload Pi after install.
 
 ```text
 /warm                  # show status and savings
+/warm config           # show effective runtime configuration and JSON file path
+/warm status           # show warm statistics and status
 /warm savings          # show only the savings summary
 /warm on               # enable warming
 /warm off              # disable warming
@@ -47,6 +49,7 @@ Restart or reload Pi after install.
 /warm log              # write a local diagnostic log
 /warm nolog            # stop the diagnostic log
 /warm interval=3.5m max=2 maxidle=2h spend=2.5
+/warm tools=gradle toolmin=3m toolmax=6
 ```
 
 You can also set this when Pi starts:
@@ -101,6 +104,35 @@ It does not help when:
 
 ## Configuration
 
+Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
+
+```json
+{
+  "enabled": false,
+  "warmDuringTools": ["gradle"],
+  "toolWarmMinRuntimeMs": 180000,
+  "toolWarmMaxProbes": 6,
+  "intervalMs": null,
+  "maxIdleWarmMs": 1800000
+}
+```
+
+Then use `/warm on` to enable warming with these settings and `/warm off`
+to disable it. These commands preserve your tool policy and do not rewrite
+the JSON file. With the example above, each new session starts disabled.
+Set `enabled` to `true` in the file to enable warming on startup instead.
+
+The file is read on `session_start` (including extension reload). Restart or
+reload Pi after editing it. Precedence: built-in defaults, JSON, environment
+debug flag, explicit `--warm-cache` tokens, then runtime `/warm` commands.
+An absent file retains built-in behavior; an invalid/unreadable file disables
+automatic warming and reports an error. Correct it and reload Pi.
+The extension does not create or modify this file automatically.
+
+JSON keys use the `WarmCacheConfig` field names in `src/types.ts`, not the
+command aliases below. Durations are numbers in milliseconds; unknown fields,
+invalid types and unsupported tool presets are rejected.
+
 Useful tokens for `/warm` and `--warm-cache`:
 
 | Token | Meaning | Default |
@@ -112,6 +144,35 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
 | `log` / `nolog` | Local JSONL log | off |
+| `tools=` | Allowlisted long-tool presets; currently `gradle`, or `off` | off |
+| `tools=all` | Opt into all tool names and commands (`warmAllTools: true` in JSON) | off |
+| `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
+| `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
+
+To opt into **all tools**, add `"warmAllTools": true` to the JSON file.
+This overrides the `warmDuringTools` allowlist, including for parallel tools.
+Use `/warm on` and `/warm off` as usual; the policy is preserved.
+For a runtime-only override use `/warm tools=all`; `/warm tools=gradle`
+returns to Gradle-only and `/warm tools=off` disables tool warming but leaves
+idle warming enabled if the master switch is on. All-tools mode does not
+itself enable the master switch.
+
+The minimum runtime, probe count, idle cutoff, spend/route gates and payload
+revision fencing still apply. Tools must actually be executing; model
+generation alone is not eligible. This mode also includes browser, custom
+tools and subagents, which may themselves make network/model requests that
+the parent extension cannot observe. Enable it only if that wider scope is
+acceptable. The extension never executes tool calls returned by a warm probe.
+
+The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
+command with plain arguments, optionally prefixed by `cd android &&` (or
+another literal directory). Quoted arguments, substitutions, pipelines,
+background jobs and trailing commands are deliberately rejected. For example,
+`./gradlew build` is eligible but `./gradlew --version; sleep 3600` is not.
+Changing `/warm` settings during a tool run preserves its lifecycle tracking.
+When real work resumes, an outstanding probe is cancelled and any late result
+is ignored; cancellation is not counted as a provider failure. Cancellation
+cannot guarantee that the provider stops processing or billing the request.
 
 The 1-hour Anthropic mode follows the cache retention already on the Pi request.
 This extension does not add 1-hour markers to your real turns.
@@ -119,6 +180,16 @@ This extension does not add 1-hour markers to your real turns.
 `/warm now` ignores the idle cutoff and the spend ceiling.
 
 ## Status and savings
+
+`/warm config` shows the current effective settings, including startup JSON,
+CLI and runtime overrides, not a fresh read of the config file. It also shows
+the config file path. `null` values mean provider/default policy rather than
+a resolved interval; use `/warm status` to inspect the resolved strategy.
+
+`/warm status` and bare `/warm` are read-only equivalents:
+they report lifecycle, route, tool policy, next probe, hits/misses, probe cost,
+estimated savings, failure/deferral state and the last attempt. These commands
+do not toggle warming, reset counters, change timers or send a probe.
 
 `/warm` shows whether warming is active, the current route, the next probe time, and a savings summary.
 
@@ -135,6 +206,7 @@ It does not store prompts or API keys.
 
 - After compaction or a model change, wait for the next real turn.
 - If the agent is busy at a tick, that probe is deferred.
+- With `tools=gradle`, an exact captured request may be replayed while a matching `gradle`/`gradlew` shell command runs. Unallowlisted parallel sibling tools, a new provider request, compaction, branch/model changes, or the probe limit stop in-tool warming.
 - Session resume waits for the first real turn.
 - In print or RPC mode, warming can still run; the widget is hidden when there is no UI.
 - Codex can pause automatic warming if probe output is repeatedly huge; use `/warm resume` or `/warm codex-off`.
@@ -142,3 +214,5 @@ It does not store prompts or API keys.
 ## License
 
 MIT
+
+This repository is derived from [ribbons-digital/pi-warm-cache](https://github.com/ribbons-digital/pi-warm-cache). Original copyright and license notices are retained.

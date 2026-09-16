@@ -12,7 +12,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { parseConfigArgs } from "./config.ts";
+import { loadConfigJson, parseConfigArgs, warmCacheConfigPath } from "./config.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
@@ -57,11 +57,18 @@ export default function piWarmCache(pi: ExtensionAPI) {
   pi.registerFlag("warm-cache", {
     description: "Enable or configure pi-warm-cache (true/false or config tokens)",
     type: "string",
-    default: "true",
+    default: "",
   });
 
   pi.on("session_start", async (event, ctx) => {
     warmer.bindContext(ctx);
+
+    const loaded = loadConfigJson();
+    config = loaded.config;
+    if (loaded.error) {
+      if (ctx.hasUI) ctx.ui.notify(`pi-warm-cache disabled: ${loaded.error}`, "warning");
+      else process.stderr.write(`pi-warm-cache disabled: ${loaded.error}\n`);
+    }
 
     // Opt-in file diagnostics. Never default-write into the project cwd.
     const envDebug = process.env.PI_WARM_CACHE_DEBUG;
@@ -70,7 +77,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
     }
 
     const flag = pi.getFlag("warm-cache");
-    if (Object.prototype.toString.call(flag) === "[object String]") {
+    if (!loaded.error && Object.prototype.toString.call(flag) === "[object String]") {
       const value = String(flag);
       if (value === "false" || value === "0" || value === "off") {
         config = { ...config, enabled: false };
@@ -147,6 +154,14 @@ export default function piWarmCache(pi: ExtensionAPI) {
     warmer.onAgentSettled(ctx);
   });
 
+  pi.on("tool_execution_start", async (event, ctx) => {
+    warmer.onToolExecutionStart(event, ctx);
+  });
+
+  pi.on("tool_execution_end", async (event, ctx) => {
+    warmer.onToolExecutionEnd(event, ctx);
+  });
+
   /**
    * CRITICAL PATH: capture the real serialized provider payload.
    * READ-ONLY - do not return a modified payload.
@@ -154,12 +169,13 @@ export default function piWarmCache(pi: ExtensionAPI) {
    * and silently doubles cache-write cost outside Pi's retention gates.
    */
   pi.on("before_provider_request", (event, ctx) => {
-    if (warmer.isWarming()) return;
-    warmer.capturePayload(event.payload, ctx);
+    // Registry.complete probes use their own onPayload, not this agent hook.
+    warmer.onProviderRequestStart(event.payload, ctx);
   });
 
   pi.on("message_end", async (event, ctx) => {
     if (event.message.role !== "assistant") return;
+    warmer.onAssistantMessageEnd(ctx);
     const usage = event.message.usage;
     if (!usage) return;
     warmer.noteAssistantUsage(ctx, usage);
@@ -167,15 +183,28 @@ export default function piWarmCache(pi: ExtensionAPI) {
 
   pi.registerCommand("warm", {
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
+      if (trimmed.toLowerCase() === "config") {
+        ctx.ui.notify(
+          `Effective runtime configuration (not just file contents)\nConfig file: ${warmCacheConfigPath()}\n` +
+          `${JSON.stringify(warmer.getConfig(), null, 2)}\n` +
+          "Durations are milliseconds. null uses provider/default policy; see /warm status for resolved status.",
+          "info",
+        );
+        return;
+      }
       if (trimmed.toLowerCase() === "savings") {
         const summary = warmer.getSavingsSummaryText();
         ctx.ui.notify(warmer.isXaiRoute() ? `xAI best-effort ${summary}` : summary, "info");
         return;
       }
-      if (!trimmed || trimmed === "status") {
+      if (trimmed.toLowerCase() === "stat") {
+        ctx.ui.notify("Unknown command: stat. Use /warm status.", "warning");
+        return;
+      }
+      if (!trimmed || trimmed.toLowerCase() === "status") {
         ctx.ui.notify(warmer.getStatusText(), "info");
         return;
       }
@@ -286,7 +315,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
           `${warmer.isXaiRoute() ? "xAI best-effort " : "pi-warm-cache "}sticky block cleared. Timers resume if enabled (use /warm codex-off to disable Codex auto-warm).`,
           "info",
         );
-        warmer.onAgentSettled(ctx);
+        warmer.reschedule();
         return;
       }
 
@@ -303,7 +332,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
             : "Codex auto-warm disabled. /warm now still works for a one-shot probe.",
           "info",
         );
-        warmer.onAgentSettled(ctx);
+        warmer.reschedule();
         return;
       }
 
@@ -332,7 +361,7 @@ export default function piWarmCache(pi: ExtensionAPI) {
         `pi-warm-cache${warmer.isXaiRoute() ? " xAI best-effort" : ""} on (ttl=${config.anthropicTtl}, interval=${config.intervalMs ?? "auto"}, max=${config.maxConcurrentWarmSessions}, log=${config.logToFile ? "on" : "off"}${block ? `, autoWarm=blocked` : ""})`,
         "info",
       );
-      warmer.onAgentSettled(ctx);
+      warmer.reschedule();
     },
   });
 }

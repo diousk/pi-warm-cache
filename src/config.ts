@@ -1,4 +1,61 @@
-import { DEFAULT_CONFIG, type WarmCacheConfig } from "./types.ts";
+import { DEFAULT_CONFIG, type ToolWarmPreset, type WarmCacheConfig } from "./types.ts";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+export function warmCacheConfigPath(): string {
+  return join(homedir(), ".pi", "agent", "warm-cache.json");
+}
+
+/** Strict, atomic validation: a bad field never silently enables a default. */
+export function parseConfigJson(text: string): WarmCacheConfig {
+  const parsed = JSON.parse(text);
+  if (!parsed || Object.prototype.toString.call(parsed) !== "[object Object]") {
+    throw new Error("configuration must be a JSON object");
+  }
+  const next = { ...DEFAULT_CONFIG, warmDuringTools: [...DEFAULT_CONFIG.warmDuringTools] };
+  const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm", "warmAllTools"]);
+  const positive = new Set(["maxConcurrentWarmSessions", "maxConsecutiveFailures", "maxOutputTokens", "toolWarmMaxProbes"]);
+  const nonnegative = new Set(["minCachedTokens", "toolWarmMinRuntimeMs"]);
+  for (const [key, value] of Object.entries(parsed)) {
+    let valid = false;
+    if (booleans.has(key)) valid = value === true || value === false;
+    else if (positive.has(key)) valid = Number.isSafeInteger(value) && Number(value) >= 1;
+    else if (nonnegative.has(key)) valid = Number.isSafeInteger(value) && Number(value) >= 0;
+    else if (key === "intervalMs") valid = value === null || (Number.isSafeInteger(value) && Number(value) >= 1000);
+    else if (key === "maxIdleWarmMs") valid = value === null || (Number.isSafeInteger(value) && Number(value) >= 0);
+    else if (key === "warmSpendCeilingUsd") valid = value === null || (Number.isFinite(value) && Number(value) >= 0);
+    else if (key === "anthropicTtl") valid = value === "auto" || value === "5m" || value === "1h";
+    else if (key === "warmSuffix") valid = Object.prototype.toString.call(value) === "[object String]";
+    else if (key === "warmDuringTools") valid = Array.isArray(value) && value.every((item) => item === "gradle");
+    if (!valid) throw new Error(`invalid or unknown configuration field: ${key}`);
+    Object.assign(next, { [key]: value });
+  }
+  return next;
+}
+
+interface LoadedConfig {
+  config: WarmCacheConfig;
+  error?: string;
+}
+
+export function loadConfigJson(path = warmCacheConfigPath()): LoadedConfig {
+  try {
+    return { config: parseConfigJson(readFileSync(path, "utf8")) };
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return { config: { ...DEFAULT_CONFIG, warmDuringTools: [] } };
+    }
+    return {
+      config: { ...DEFAULT_CONFIG, enabled: false, warmDuringTools: [] },
+      error: `${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+function isToolWarmPreset(value: string): value is ToolWarmPreset {
+  return value === "gradle";
+}
 
 export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CONFIG): WarmCacheConfig {
   const next = { ...base };
@@ -86,6 +143,29 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
       if (Number.isFinite(n) && n >= 0) next.minCachedTokens = Math.floor(n);
       continue;
     }
+    if (key === "tools" || key === "tool") {
+      const requested = value.toLowerCase().split(",").map((item) => item.trim()).filter(Boolean);
+      if (requested.some((item) => item === "off" || item === "none")) {
+        next.warmDuringTools = [];
+        next.warmAllTools = false;
+      } else if (requested.length === 1 && requested[0] === "all") {
+        next.warmAllTools = true;
+      } else {
+        next.warmAllTools = false;
+        next.warmDuringTools = requested.filter(isToolWarmPreset);
+      }
+      continue;
+    }
+    if (key === "toolmin") {
+      const parsed = parseDurationMs(value);
+      if (parsed !== null) next.toolWarmMinRuntimeMs = parsed;
+      continue;
+    }
+    if (key === "toolmax") {
+      const n = Number(value);
+      if (Number.isFinite(n) && n >= 1) next.toolWarmMaxProbes = Math.floor(n);
+      continue;
+    }
     if (key === "ttl") {
       if (value === "5m" || value === "1h" || value === "auto") {
         next.anthropicTtl = value;
@@ -132,4 +212,3 @@ export function formatTokens(n: number): string {
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
   return `${(n / 1_000_000).toFixed(2)}M`;
 }
-
