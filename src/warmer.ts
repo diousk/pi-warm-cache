@@ -916,11 +916,7 @@ export class SessionWarmer {
       this.lifecycleState = "blocked";
     }
     this.clearTimers();
-    if (this.capability.state === "verified" && ctx.hasUI) {
-      ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "warm paused · agent active"));
-    } else if (this.capability.state !== "verified") {
-      this.clearCapabilityUi(ctx);
-    }
+    this.showAgentWorking(ctx);
     this.log({
       event: "agent_start",
       source: "system",
@@ -990,6 +986,7 @@ export class SessionWarmer {
     this.clearTimers();
     this.providerRequestInFlight = true;
     this.capturePayload(payload, ctx);
+    this.showAgentWorking(ctx);
   }
 
   /** An assistant response ended, so no real provider request is in flight. */
@@ -1024,9 +1021,7 @@ export class SessionWarmer {
       this.clearTimers();
       if (this.warming) this.abort?.abort();
       if (this.runningTools.size === 0) this.toolWarmProbeCount = 0;
-      if (this.currentCapability(ctx).state === "verified" && ctx.hasUI) {
-        ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "warm paused · agent active"));
-      }
+      this.showAgentWorking(ctx);
       return;
     }
     this.syncToolWarmSchedule(ctx, "eligible tool still running");
@@ -1196,6 +1191,7 @@ export class SessionWarmer {
   private syncToolWarmSchedule(ctx: ExtensionContext, reason: string): void {
     if (!this.canWarmDuringTool()) {
       this.clearTimers();
+      this.showAgentWorking(ctx);
       return;
     }
     this.reschedule({ reason });
@@ -1214,6 +1210,7 @@ export class SessionWarmer {
     const toolWarmAllowed = this.canWarmDuringTool();
     if (!agentIdle && !toolWarmAllowed) {
       this.clearTimers();
+      this.showAgentWorking(ctx);
       return;
     }
     if (this.lifecycleState === "awaiting-reanchor") {
@@ -1424,6 +1421,17 @@ export class SessionWarmer {
       return;
     }
     clearWarmUi(ctx);
+  }
+
+  /** Replace both UI surfaces when real work suspends the countdown. */
+  private showAgentWorking(ctx: ExtensionContext): void {
+    if (!this.config.enabled) {
+      this.showIdle(ctx, "disabled");
+    } else if (this.autoWarmBlockReason) {
+      this.showIdle(ctx, "auto-warm blocked", this.autoWarmBlockReason);
+    } else {
+      this.showIdle(ctx, "agent working");
+    }
   }
 
   /** Benign non-warming states (not painted as errors). */

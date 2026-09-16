@@ -5632,4 +5632,55 @@ function deepEqualExcept<Actual, Expected>(
   }
 }
 
+// Busy transitions replace the cancelled countdown on both UI surfaces.
+{
+  let widget: string[] | undefined;
+  let status = "";
+  let idle = true;
+  const ctx = contextFixture({
+    hasUI: true, cwd: process.cwd(), isIdle: () => idle,
+    model: modelFixture({ id: "gpt-5.6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" }),
+    sessionManager: { getSessionId: () => "standby-ui" },
+    ui: {
+      theme: { fg: (_: string, text: string) => text },
+      setWidget: (_: string, lines?: string[]) => { widget = lines; },
+      setStatus: (_: string, text?: string) => { status = text ?? ""; },
+    },
+  });
+  const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "off" }));
+  const payload = { model: "gpt-5.6", input: [], prompt_cache_key: "standby-ui" };
+  const standby = () => {
+    assert(widget?.[0] === "⚡ Cache warming standby · Agent working", "widget must replace cancelled countdown with standby");
+    assert(status === "Cache warming standby · Agent working", "status must agree with standby widget");
+    assert(warmer.getStatusText().includes("nextDue=none"), "standby must have no scheduled refresh");
+  };
+  try {
+    warmer.bindContext(ctx);
+    warmer.capturePayload(payload, ctx);
+    warmer.noteAssistantUsage(ctx, { cacheRead: 2000 });
+    warmer.onAgentSettled(ctx);
+    assert(status.includes("Next refresh in"), "idle session must schedule warming");
+    idle = false;
+    warmer.onAgentStart(ctx);
+    standby();
+    warmer.setConfig({ ...DEFAULT_CONFIG, warmDuringTools: ["gradle"] });
+    warmer.onProviderRequestStart(payload, ctx);
+    standby();
+    warmer.onAssistantMessageEnd(ctx);
+    warmer.noteAssistantUsage(ctx, { cacheRead: 2000 });
+    warmer.onToolExecutionStart({ toolCallId: "build", toolName: "bash", args: { command: "./gradlew build" } }, ctx);
+    assert(status.includes("Next refresh in"), "eligible tool must restore countdown");
+    warmer.onToolExecutionStart({ toolCallId: "other", toolName: "read", args: {} }, ctx);
+    standby();
+    warmer.onToolExecutionEnd({ toolCallId: "other" }, ctx);
+    assert(status.includes("Next refresh in"), "remaining eligible tool must restore countdown");
+    warmer.onToolExecutionEnd({ toolCallId: "build" }, ctx);
+    standby();
+    warmer.setConfig({ ...warmer.getConfig(), showWidget: false });
+    assert(widget === undefined && status.includes("standby"), "hidden widget must stay hidden in standby");
+  } finally {
+    warmer.dispose();
+  }
+}
+
 console.log("provider.test.ts: all assertions passed");

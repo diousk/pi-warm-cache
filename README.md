@@ -226,6 +226,10 @@ do not toggle warming, reset counters, change timers or send a probe.
 
 The live widget shows `Cache warming active` and an integer minutes/seconds
 countdown such as `Next refresh in 2m 45s`, updated every 15 seconds.
+While the agent is working without an eligible tool-warming schedule, both the
+widget and status line show `Cache warming standby · Agent working`. Warming
+remains enabled and resumes automatically when eligible; cancelled countdowns
+are removed from both surfaces.
 After the first warming response, it shows `Cache hits: M · Misses: N` for
 warming requests only; request errors are reported separately. Estimated
 savings are omitted from the live widget and remain available in `/warm savings`.
