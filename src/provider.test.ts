@@ -5638,6 +5638,36 @@ function deepEqualExcept<Actual, Expected>(
   }
 }
 
+// Advisor command toggles must round-trip through the persisted config file.
+{
+  const directory = mkdtempSync(join(tmpdir(), "warm-advisor-config-command-"));
+  const path = join(directory, "agent", "warm-cache.json");
+  let handler: ((args: string, ctx: ExtensionContext) => Promise<void>) | undefined;
+  const notices: string[] = [];
+  const pi = extensionApiFixture({
+    registerFlag() {}, on() {},
+    registerCommand: (_name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => {
+      handler = command.handler;
+    },
+  });
+  piWarmCache(pi, (config) => saveConfigJson(config, path));
+  const ctx = contextFixture({
+    hasUI: true,
+    isIdle: () => true,
+    ui: {
+      notify: (message: string) => notices.push(message),
+      setStatus() {}, setWidget() {}, theme: { fg: (_: string, text: string) => text },
+    },
+  });
+  assert(handler !== undefined, "advisor config command handler should be registered");
+  await handler("advisor=on", ctx);
+  assert(loadConfigJson(path).config.warmAdvisor, "advisor=on must persist warmAdvisor=true");
+  await handler("advisor=off", ctx);
+  assert(!loadConfigJson(path).config.warmAdvisor, "advisor=off must persist warmAdvisor=false");
+  assert(notices.some((notice) => notice.includes("Settings saved to")), "advisor toggles should confirm config persistence");
+  rmSync(directory, { recursive: true, force: true });
+}
+
 // Busy transitions replace the cancelled countdown on both UI surfaces.
 {
   let widget: string[] | undefined;
