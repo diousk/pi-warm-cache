@@ -7,6 +7,7 @@
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import "./advisor.test.ts";
 import { tmpdir } from "node:os";
 import type { Model } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";

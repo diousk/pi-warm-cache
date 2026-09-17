@@ -147,6 +147,11 @@ export function resetProbeSpendLedgerForTest(): void {
 
 export type CompleteRequest = ExtensionContext["modelRegistry"]["complete"];
 
+export interface SessionWarmerOptions {
+  /** Replay Codex exactly when a side call must refresh its original endpoint. */
+  exactCodexReplay?: boolean;
+}
+
 function resolveCompleteRequest(
   ctx: ExtensionContext,
   injected?: CompleteRequest,
@@ -266,6 +271,7 @@ export class SessionWarmer {
   private toolWarmProbeCount = 0;
   /** True from a real provider request start until the assistant response/tool phase. */
   private providerRequestInFlight = false;
+  private readonly options: SessionWarmerOptions;
   /** Last warm attempt error/result summary for /warm status. */
   private lastAttempt: {
     at: number;
@@ -274,9 +280,14 @@ export class SessionWarmer {
     detail: string;
   } | null = null;
 
-  constructor(pi: ExtensionAPI, completeRequest?: CompleteRequest) {
+  constructor(
+    pi: ExtensionAPI,
+    completeRequest?: CompleteRequest,
+    options: SessionWarmerOptions = {},
+  ) {
     this.pi = pi;
     this.completeRequest = completeRequest;
+    this.options = options;
   }
 
   isWarming(): boolean {
@@ -2100,7 +2111,7 @@ export class SessionWarmer {
             const cloned = structuredClone(payload);
             const codex = model.api === "openai-codex-responses";
             const xaiBestEffort = anchor.cacheFamily === "xai-best-effort";
-            const warmPayload = codex
+            const warmPayload = codex && !this.options.exactCodexReplay
               ? appendWarmUserTurn(cloned, this.config.warmSuffix, model.api)
               : cloned;
             return xaiBestEffort

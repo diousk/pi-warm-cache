@@ -93,6 +93,8 @@ export type AnthropicTtlMode = "5m" | "1h" | "auto";
 export type ToolWarmPreset = "gradle";
 
 export interface WarmCacheConfig {
+  /** Opt-in, version-scoped rpiv-advisor independent request warming. */
+  warmAdvisor: boolean;
   /** Master switch. Default true. */
   enabled: boolean;
   /**
@@ -151,6 +153,7 @@ export interface WarmCacheConfig {
 }
 
 export const DEFAULT_CONFIG: WarmCacheConfig = {
+  warmAdvisor: false,
   enabled: true,
   anthropicTtl: "auto",
   intervalMs: 4 * 60_000,

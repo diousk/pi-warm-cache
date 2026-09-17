@@ -138,11 +138,63 @@ It does not help when:
 
 ## Configuration
 
+### Independent rpiv-advisor warming (experimental)
+
+`/warm advisor=on` opts in; `/warm advisor=off` disables it. The setting persists
+as `warmAdvisor` in the usual configuration file and defaults to `false`.
+`/warm status` includes a separate advisor status. `/warm now` still probes only
+the main agent, not the advisor.
+
+This bridge targets Pi 0.85.1's private `modelRegistry.runtime.completeSimple`
+path and the stock rpiv-advisor system prompt fingerprint. It does not modify
+rpiv-advisor files. Unknown/custom prompts, ambiguous parallel tool executions,
+legacy global completion paths, and unavailable runtimes are not captured.
+Custom authentication/environment/fetch overrides are also skipped, rather than
+silently replayed with different credentials or routing.
+The normal advisor response is preserved. The runtime wrapper is removed on
+shutdown and is not installed twice on the same runtime.
+
+For recognized requests, a missing session ID is supplied before dispatch, so
+the advisor's real requests and probes share a stable cache identity distinct
+from the executor. Existing IDs and explicit `cacheRetention: none` are respected.
+This changes cache routing for opted-in requests, not their conversation content.
+Each completed successful request supplies an independent payload and timer.
+Codex advisor warming caps the effective interval at three minutes because live
+tests found the four-minute boundary could already miss; a shorter configured
+interval is preserved. Other advisor routes use the configured interval.
+Provider eligibility, idle cutoff, output,
+failure, spend, and process-wide concurrency safeguards still apply. Advisor
+probes do not enter session history and do not invoke advisor tools.
+Probes preserve the chosen transport and timeout/retry settings, but use their
+own cancellation signal and do not invoke callbacks belonging to the real call.
+For Codex advisors, probes replay the captured endpoint exactly instead of
+appending the main-agent `OK` suffix. The stock advisor prompt already constrains
+its answer, and exact replay refreshes the endpoint future advisor calls extend.
+
+The advisor idle cutoff is measured from its own captured request, not executor
+activity. Its timer is independent of the main agent's tool-batch probe count.
+New advisor executions, session changes, compaction, and shutdown invalidate old
+captures. Changes to the persisted advisor selection or an inactive advisor tool
+are checked before a scheduled probe; they stop further probes. Status is exposed
+through `/warm status`, without replacing the main agent's widget.
+
+Coverage includes simulated provider replay, stable identity, request isolation,
+callbacks, cancellation fencing, selection changes, idle cutoffs, and cleanup.
+An end-to-end Luna/Codex test with unmodified rpiv-advisor 2.10.1 verified that
+an exact-replay probe at the three-minute cadence rebuilt the cache and the next
+real advisor call read 4,864 cached tokens. The probe itself reported zero cache
+reads in that run; that means it created a new cache entry, not that warming
+failed. Provider reuse and net savings remain best-effort rather than guaranteed,
+and the feature consumes additional model usage. Do not add API-only
+`prompt_cache_options` or `prompt_cache_breakpoint` fields to this Codex route:
+the tested endpoint rejects them.
+
 Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
 
 ```json
 {
   "enabled": false,
+  "warmAdvisor": false,
   "warmDuringTools": ["gradle"],
   "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
@@ -186,6 +238,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `tools=all` | Allow all tool names and commands (`warmAllTools: true` in JSON) | on |
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
+| `advisor=on` / `advisor=off` | Independent rpiv-advisor warming (experimental) | off |
 
 Warming during **all tools** is enabled by default (`"warmAllTools": true`).
 An existing saved `"warmAllTools": false` remains respected; use `/warm tools=all`

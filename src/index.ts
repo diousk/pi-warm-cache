@@ -16,6 +16,7 @@ import { loadConfigJson, parseConfigArgs, saveConfigJson, warmCacheConfigPath } 
 import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
+import { AdvisorWarmer } from "./advisor.ts";
 import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
 
 /**
@@ -64,6 +65,7 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
 
 export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
   const warmer = new SessionWarmer(pi);
+  const advisorWarmer = new AdvisorWarmer(pi);
   let config = { ...DEFAULT_CONFIG };
   let lastCapabilityNoticeKey: string | null = null;
 
@@ -75,6 +77,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("session_start", async (event, ctx) => {
+    advisorWarmer.dispose();
     warmer.bindContext(ctx);
 
     const loaded = loadConfigJson();
@@ -103,6 +106,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
     }
 
     warmer.setConfig(config);
+    advisorWarmer.configure(config, ctx);
 
     // Payload anchors are never restored across resume (turn-specific).
     // Stats persistence can be added later via appendEntry.
@@ -133,6 +137,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("session_shutdown", async () => {
+    advisorWarmer.dispose();
     lastCapabilityNoticeKey = null;
     warmer.dispose();
   });
@@ -150,11 +155,13 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
   // Compaction changes the prompt prefix. Old payload must not be replayed.
   pi.on("session_compact", async (_event, ctx) => {
+    advisorWarmer.invalidate("compacted; waiting for advisor");
     warmer.invalidateAnchor(ctx, "compacted · waiting for next turn");
   });
 
   // Branch / tree navigation changes the active prefix.
   pi.on("session_tree", async (_event, ctx) => {
+    advisorWarmer.invalidate("branch changed; waiting for advisor");
     warmer.invalidateAnchor(ctx, "branch changed · waiting for next turn");
   });
 
@@ -169,10 +176,12 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
+    advisorWarmer.toolStart(event.toolCallId, event.toolName);
     warmer.onToolExecutionStart(event, ctx);
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
+    advisorWarmer.toolEnd(event.toolCallId);
     warmer.onToolExecutionEnd(event, ctx);
   });
 
@@ -213,6 +222,8 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         ["maxidle=30m", "Stop after 30 minutes without a real turn"],
         ["spend=1", "Set warming spend ceiling to $1"],
         ["max=3", "Allow 3 concurrent warming sessions"],
+        ["advisor=on", "Enable independent rpiv-advisor warming (experimental)"],
+        ["advisor=off", "Disable independent advisor warming"],
         ["auto", "Follow the provider's cache retention"],
         ["5m", "Use short Anthropic cadence"],
         ["1h", "Follow existing 1-hour Anthropic retention"],
@@ -235,7 +246,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       return items.length > 0 ? items : null;
     },
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {
@@ -257,7 +268,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         return;
       }
       if (!trimmed || trimmed.toLowerCase() === "status") {
-        ctx.ui.notify(warmer.getStatusText(), "info");
+        ctx.ui.notify(`${warmer.getStatusText()}\n${advisorWarmer.status()}`, "info");
         return;
       }
       if (trimmed.toLowerCase() === "now") {
@@ -354,13 +365,15 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
 
       const lower = trimmed.toLowerCase();
-      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
+      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
       const unknown = lower.split(/\s+/).find((token) => !knownTokens.test(token));
       if (unknown) {
         ctx.ui.notify(`Unknown option: ${unknown}. Type /warm followed by a space to see available options.`, "warning");
         return;
       }
       const persistConfig = () => {
+        advisorWarmer.configure(config, ctx);
+        if (config.warmAdvisor) ctx.ui.notify(advisorWarmer.status(), "info");
         try {
           saveConfig(config);
           ctx.ui.notify(`Settings saved to ${warmCacheConfigPath()}`, "info");

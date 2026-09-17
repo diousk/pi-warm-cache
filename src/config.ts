@@ -29,7 +29,7 @@ export function parseConfigJson(text: string): WarmCacheConfig {
     throw new Error("configuration must be a JSON object");
   }
   const next = { ...DEFAULT_CONFIG, warmDuringTools: [...DEFAULT_CONFIG.warmDuringTools] };
-  const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm", "warmAllTools"]);
+  const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm", "warmAllTools", "warmAdvisor"]);
   const positive = new Set(["maxConcurrentWarmSessions", "maxConsecutiveFailures", "maxOutputTokens", "toolWarmMaxProbes"]);
   const nonnegative = new Set(["minCachedTokens", "toolWarmMinRuntimeMs"]);
   for (const [key, value] of Object.entries(parsed)) {
@@ -128,6 +128,12 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
     if (!kv) continue;
     const key = kv[1]!.toLowerCase();
     const value = kv[2]!;
+    if (key === "advisor") {
+      const enabled = value.toLowerCase();
+      if (enabled !== "on" && enabled !== "off") throw new Error("advisor must be on or off");
+      next.warmAdvisor = enabled === "on";
+      continue;
+    }
 
     if (key === "interval" || key === "intervalms") {
       next.intervalMs = parseDurationMs(value);

@@ -53,9 +53,13 @@ function waitForStableFile(path, { samples = 3, gapMs = 25, maxMs = 1000 } = {})
 }
 
 const providerFile = resolve(root, "src/provider.ts");
+const advisorFile = resolve(root, "src/advisor.ts");
+const advisorTestFile = resolve(root, "src/advisor.test.ts");
 
 waitForStableFile(testFile);
 waitForStableFile(providerFile);
+waitForStableFile(advisorFile);
+waitForStableFile(advisorTestFile);
 
 // Re-hash after stability wait so printed digests match what the suite loads.
 const digest = sha256File(testFile);
@@ -65,6 +69,8 @@ const bytes = statSync(testFile).size;
 console.log(`[run-unit-tests] file=${testFile}`);
 console.log(`[run-unit-tests] sha256=${digest}`);
 console.log(`[run-unit-tests] provider_sha256=${providerDigest}`);
+console.log(`[run-unit-tests] advisor_sha256=${sha256File(advisorFile)}`);
+console.log(`[run-unit-tests] advisor_test_sha256=${sha256File(advisorTestFile)}`);
 console.log(`[run-unit-tests] bytes=${bytes}`);
 
 const result = spawnSync(
