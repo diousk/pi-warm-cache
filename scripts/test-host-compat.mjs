@@ -1,7 +1,7 @@
 // Exercise the installed Pi loader and (on 0.86) its actual CacheWarmer.
 // All provider calls are in-memory; no credentials or network are used.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as ai from "@earendil-works/pi-ai";
@@ -13,6 +13,19 @@ import { createHash } from "node:crypto";
 
 const root = new URL("../node_modules/@earendil-works/pi-coding-agent/", import.meta.url);
 const { version } = JSON.parse(readFileSync(new URL("package.json", root), "utf8"));
+for (const name of ["pi-ai", "pi-tui"]) {
+  const installed = JSON.parse(readFileSync(new URL(`../${name}/package.json`, root), "utf8"));
+  assert.equal(installed.version, version, "compatibility tests require matching Pi package versions");
+}
+const [major, minor] = version.split(".").map(Number);
+const expectsNativeWarming = major > 0 || minor >= 86;
+const nativeModule = new URL("dist/core/cache-warmer.js", root);
+const hasNativeWarming = existsSync(nativeModule);
+if (expectsNativeWarming) {
+  assert(hasNativeWarming, `Pi ${version}: expected native CacheWarmer is missing; update the host compatibility test`);
+  assert(ai.normalizeContext && ai.getCurrentSystemPrompt && ai.getCurrentTools,
+    `Pi ${version}: expected transcript helpers are missing`);
+}
 const { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } = await import(new URL("dist/core/extensions/loader.js", root));
 const { createEventBus } = await import(new URL("dist/core/event-bus.js", root));
 const loaded = await loadExtensions([fileURLToPath(new URL("../src/index.ts", import.meta.url))], process.cwd());
@@ -109,12 +122,12 @@ try {
     assert(!isAdvisorRequest(sectioned), "prompt sections must affect recognition");
     assert.equal(currentInstructions(normalized).prompt, prompt);
   } else {
-    assert.equal(version, "0.85.1");
+    assert(!expectsNativeWarming, "new hosts must exercise transcript compatibility");
     assert(!isAdvisorRequest({ systemPrompt: prompt, messages: [] }), "legacy missing tools remains unrecognized");
   }
 
-  if (version === "0.86.0") {
-    const { CacheWarmer } = await import(new URL("dist/core/cache-warmer.js", root));
+  if (hasNativeWarming) {
+    const { CacheWarmer } = await import(nativeModule);
     let nativeCalls = 0;
     const native = new CacheWarmer({ streamSimple: (_model, _context, options) => ({ result: async () => {
       nativeCalls++;
@@ -143,6 +156,7 @@ try {
       assert.equal(nativeCalls, 1, "native warming must resume under Pi policy when extension is off");
       assert.equal(await status(), disabledStatus, "native request must not reset extension state");
     } finally { native.cancel(); mock.timers.reset(); }
+    console.log(`native CacheWarmer: Pi ${version} active/idle veto and delegation passed`);
   }
   assert.equal(probeCalls, 0);
   console.log(`host compatibility: Pi ${version} passed`);

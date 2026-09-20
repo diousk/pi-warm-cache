@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi: ["0.85.1", "0.86.0"]
+        pi: ["0.85.1", "0.86.0", "0.86.1", "latest"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -38,7 +38,12 @@ jobs:
 
       - name: Select Pi compatibility version
         if: matrix.pi != '0.85.1'
-        run: pnpm add -D --save-exact @earendil-works/pi-ai@${{ matrix.pi }} @earendil-works/pi-coding-agent@${{ matrix.pi }} @earendil-works/pi-tui@${{ matrix.pi }}
+        env:
+          PI_TEST_VERSION: ${{ matrix.pi }}
+        run: |
+          pi_version=$(pnpm view "@earendil-works/pi-coding-agent@$PI_TEST_VERSION" version)
+          echo "Testing Pi $pi_version ($PI_TEST_VERSION)"
+          pnpm add -D --save-exact "@earendil-works/pi-ai@$pi_version" "@earendil-works/pi-coding-agent@$pi_version" "@earendil-works/pi-tui@$pi_version"
 
       - name: Run tests
         run: pnpm test

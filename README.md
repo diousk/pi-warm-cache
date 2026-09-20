@@ -7,9 +7,12 @@ That cache expires if you leave the session idle.
 The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
-It supports [Pi](https://github.com/earendil-works/pi) 0.85.1 and 0.86.0.
-CI runs tests, type checks, and lint against both versions. Development dependencies
-remain pinned to 0.85.1; newer Pi-only APIs are isolated behind a compatibility layer.
+The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
+CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, and the latest
+stable release on each push to main and pull request. The latest job resolves one
+version for all three Pi packages. Development dependencies remain pinned to
+0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
+releases are considered validated only after their compatibility checks pass.
 
 ### Pi 0.86 native cache warming
 
