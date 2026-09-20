@@ -321,12 +321,14 @@ do not toggle warming, reset counters, change timers or send a probe.
 
 `/warm` shows whether warming is active, the current route, the next probe time, and a savings summary.
 
-The live widget shows `Cache warming active` and an integer minutes/seconds
-countdown such as `Next refresh in 2m 45s`, updated every 15 seconds.
-While the agent is working without an eligible tool-warming schedule, both the
-widget and status line show `Cache warming standby · Agent working`. Warming
-remains enabled and resumes automatically when eligible; cancelled countdowns
-are removed from both surfaces.
+The single live widget above the input field shows `Cache warming active` and
+an integer minutes/seconds countdown such as `Next refresh in 2m 45s`, updated
+every 15 seconds. No duplicate warming text is shown in the bottom status bar.
+While the agent is working without an eligible tool-warming schedule, the widget
+shows `Cache warming standby · Agent working`. Warming remains enabled and resumes
+automatically when eligible; cancelled countdowns are replaced in the widget.
+`showWidget: false` (or `/warm nowidget`) hides the persistent warming UI entirely;
+`/warm status` remains available for on-demand diagnostics.
 During tools, standby explains why no refresh is scheduled: tool warming is off,
 a tool (including a parallel sibling) is not eligible, the tool refresh limit
 was reached, or the cache anchor changed. Changing `/warm tools=…` immediately

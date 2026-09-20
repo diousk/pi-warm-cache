@@ -18,7 +18,7 @@ import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { AdvisorWarmer } from "./advisor.ts";
 import { NativeWarmingCoordinator, onNativeWarmingDecision } from "./compat.ts";
-import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
+import { clearWarmUi, renderCapabilityNotice, renderIdleUi } from "./ui.ts";
 
 /**
  * Resolve the notification level and failure label for a failed /warm now
@@ -121,15 +121,9 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       if (capability.state === "verified") {
         lastCapabilityNoticeKey = null;
         if (event.reason === "startup") {
-          ctx.ui.setStatus(
-            "pi-warm-cache",
-            ctx.ui.theme.fg(
-              "dim",
-              capability.automaticWarm
-                ? "warm ready · waiting for first cached turn"
-                : "verified · keepalive not needed",
-            ),
-          );
+          renderIdleUi(ctx, config, capability.automaticWarm
+            ? "waiting for first cached turn"
+            : "keepalive not needed");
         }
       } else {
         const noticeKey = `${capability.state}:${capability.reason}:${capability.manualProbe}`;
