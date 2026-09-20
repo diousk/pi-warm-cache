@@ -17,6 +17,7 @@ import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { AdvisorWarmer } from "./advisor.ts";
+import { NativeWarmingCoordinator, onNativeWarmingDecision } from "./compat.ts";
 import { clearWarmUi, renderCapabilityNotice } from "./ui.ts";
 
 /**
@@ -66,6 +67,9 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
 export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
   const warmer = new SessionWarmer(pi);
   const advisorWarmer = new AdvisorWarmer(pi);
+  const nativeWarming = new NativeWarmingCoordinator();
+  onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
+  pi.on("turn_start", () => nativeWarming.onRealTurn());
   let config = { ...DEFAULT_CONFIG };
   let lastCapabilityNoticeKey: string | null = null;
 
@@ -77,6 +81,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("session_start", async (event, ctx) => {
+    nativeWarming.onRealTurn();
     advisorWarmer.dispose();
     warmer.bindContext(ctx);
 
@@ -137,6 +142,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("session_shutdown", async () => {
+    nativeWarming.onRealTurn();
     advisorWarmer.dispose();
     lastCapabilityNoticeKey = null;
     warmer.dispose();
@@ -166,6 +172,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("agent_start", async (_event, ctx) => {
+    nativeWarming.onRealTurn();
     warmer.bindContext(ctx);
     warmer.onAgentStart(ctx);
   });
@@ -192,6 +199,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
    * and silently doubles cache-write cost outside Pi's retention gates.
    */
   pi.on("before_provider_request", (event, ctx) => {
+    if (nativeWarming.isNativeRequest()) return;
     // Registry.complete probes use their own onPayload, not this agent hook.
     warmer.onProviderRequestStart(event.payload, ctx);
   });
@@ -268,7 +276,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         return;
       }
       if (!trimmed || trimmed.toLowerCase() === "status") {
-        ctx.ui.notify(`${warmer.getStatusText()}\n${advisorWarmer.status()}`, "info");
+        ctx.ui.notify(`${warmer.getStatusText()}\n${nativeWarming.status(warmer.ownsAutomaticWarming(ctx))}\n${advisorWarmer.status()}`, "info");
         return;
       }
       if (trimmed.toLowerCase() === "now") {
@@ -426,7 +434,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
       if (!config.enabled) {
         clearWarmUi(ctx);
-        ctx.ui.notify("pi-warm-cache disabled", "info");
+        ctx.ui.notify("pi-warm-cache disabled. On Pi 0.86+, native warming still follows Pi's cacheWarming setting.", "info");
         return;
       }
 

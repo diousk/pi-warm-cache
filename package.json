@@ -24,6 +24,7 @@
     "url": "https://github.com/diousk/pi-warm-cache/issues"
   },
   "files": [
+    "src/compat.ts",
     "src/advisor.ts",
     "src/capability.ts",
     "src/config.ts",

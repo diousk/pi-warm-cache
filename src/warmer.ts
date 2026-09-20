@@ -302,6 +302,14 @@ export class SessionWarmer {
     return this.currentCapability();
   }
 
+  /** Keep route ownership even when spend, failure, or tool policy pauses probes. */
+  ownsAutomaticWarming(ctx: ExtensionContext): boolean {
+    if (!this.config.enabled) return false;
+    const sameModel = this.anchor?.provider === ctx.model?.provider && this.anchor?.modelId === ctx.model?.id;
+    const capability = sameModel ? this.currentCapability(ctx) : resolveProviderCapability(ctx.model);
+    return capability.state === "verified";
+  }
+
   /** True when the active or captured route belongs to xAI. */
   isXaiRoute(): boolean {
     return this.anchor?.provider === "xai" || this.ctx?.model?.provider === "xai";

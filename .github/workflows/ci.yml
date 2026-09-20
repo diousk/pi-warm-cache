@@ -11,9 +11,13 @@ permissions:
 
 jobs:
   test:
-    name: test
+    name: Pi ${{ matrix.pi }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        pi: ["0.85.1", "0.86.0"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -31,6 +35,10 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Select Pi compatibility version
+        if: matrix.pi != '0.85.1'
+        run: pnpm add -D --save-exact @earendil-works/pi-ai@${{ matrix.pi }} @earendil-works/pi-coding-agent@${{ matrix.pi }} @earendil-works/pi-tui@${{ matrix.pi }}
 
       - name: Run tests
         run: pnpm test

@@ -87,4 +87,9 @@ if (result.error) {
   process.exit(1);
 }
 
-process.exit(result.status ?? 1);
+if (result.status !== 0) process.exit(result.status ?? 1);
+const hostResult = spawnSync(process.execPath,
+  ["--experimental-strip-types", "--no-warnings", resolve(root, "scripts/test-host-compat.mjs")],
+  { cwd: root, stdio: "inherit" });
+if (hostResult.error) console.error(hostResult.error);
+process.exit(hostResult.status ?? 1);

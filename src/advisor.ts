@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, Context, Model, Api, SimpleStreamOptions } from "@earendil-works/pi-ai";
 import { SessionWarmer } from "./warmer.ts";
+import { currentInstructions } from "./compat.ts";
 import { DEFAULT_CONFIG, type WarmCacheConfig } from "./types.ts";
 
 // Pinned rpiv-advisor prompt. Unknown/custom prompts fail closed.
@@ -12,8 +13,8 @@ export const ADVISOR_PROMPT_SHA256 = "f15062e9fdc0e3950bcad23c1e4cfb79bce81e04bd
 export const CODEX_ADVISOR_MAX_INTERVAL_MS = 3 * 60_000;
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export function isAdvisorRequest(context: Context): boolean {
-  return Array.isArray(context.tools) && context.tools.length === 0 &&
-    digest(context.systemPrompt ?? "") === ADVISOR_PROMPT_SHA256;
+  const { prompt, tools } = currentInstructions(context);
+  return Array.isArray(tools) && tools.length === 0 && digest(prompt) === ADVISOR_PROMPT_SHA256;
 }
 type Complete = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => Promise<AssistantMessage>;
 interface Runtime { completeSimple: Complete }
