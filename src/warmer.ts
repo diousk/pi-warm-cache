@@ -40,6 +40,7 @@ import {
   renderReanchorUi,
   renderWaitingUi,
   renderWarmHitUi,
+  renderRefreshingUi,
 } from "./ui.ts";
 import type { StrategyResolution } from "./provider.ts";
 import type {
@@ -300,6 +301,14 @@ export class SessionWarmer {
 
   getCapability(): ProviderCapability {
     return this.currentCapability();
+  }
+
+  /** Keep route ownership even when spend, failure, or tool policy pauses probes. */
+  ownsAutomaticWarming(ctx: ExtensionContext): boolean {
+    if (!this.config.enabled) return false;
+    const sameModel = this.anchor?.provider === ctx.model?.provider && this.anchor?.modelId === ctx.model?.id;
+    const capability = sameModel ? this.currentCapability(ctx) : resolveProviderCapability(ctx.model);
+    return capability.state === "verified";
   }
 
   /** True when the active or captured route belongs to xAI. */
@@ -1434,7 +1443,7 @@ export class SessionWarmer {
     clearWarmUi(ctx);
   }
 
-  /** Replace both UI surfaces when real work suspends the countdown. */
+  /** Replace the editor widget when real work suspends the countdown. */
   private showAgentWorking(ctx: ExtensionContext): void {
     if (!this.config.enabled) {
       this.showIdle(ctx, "disabled");
@@ -2059,7 +2068,7 @@ export class SessionWarmer {
 
     const unverifiedProbe = anchor.capability.state === "unverified";
     if (ctx.hasUI && !unverifiedProbe) {
-      ctx.ui.setStatus("pi-warm-cache", ctx.ui.theme.fg("dim", "Refreshing cache…"));
+      renderRefreshingUi(ctx, this.config);
     }
     this.log({
       event: "warm_start",

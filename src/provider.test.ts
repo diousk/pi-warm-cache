@@ -70,6 +70,7 @@ import {
   renderProbeRetryUi,
   renderReanchorUi,
   renderWaitingUi,
+  renderRefreshingUi,
   renderWarmHitUi,
 } from "./ui.ts";
 import { formatWarmSettings, resolveWarmNowFailure } from "./index.ts";
@@ -3805,14 +3806,14 @@ function deepEqualExcept<Actual, Expected>(
   );
   const statuses = calls
     .filter((call) => call.kind === "status")
-    .map((call) => String(call.value));
+    .map((call) => call.value);
   assert(
-    statuses.some((status) => status === "warm · re-anchoring"),
-    "re-anchoring status should be concise",
+    statuses.every((status) => status === undefined),
+    "all warming states must clear the duplicate footer status",
   );
   assert(
-    statuses.some((status) => status.includes("Cache hits: 2 · Misses: 0")),
-    "healthy status should show cadence, probe ratio, and prompt size",
+    widgets.some((call) => Array.isArray(call.value) && call.value.some((line) => line.includes("Cache hits: 2 · Misses: 0"))),
+    "healthy widget should retain probe statistics",
   );
 
   renderWaitingUi(
@@ -3829,15 +3830,15 @@ function deepEqualExcept<Actual, Expected>(
     },
   );
   const deferredWidget = calls.filter((call) => call.kind === "widget").at(-1)?.value;
-  const deferredStatus = String(calls.filter((call) => call.kind === "status").at(-1)?.value);
+  const deferredStatus = calls.filter((call) => call.kind === "status").at(-1)?.value;
   assert(
     Array.isArray(deferredWidget) &&
       deferredWidget.some((line) => String(line).includes("deferred - 2/3 slots used")),
     "waiting widget should show the gate deferral and occupied slots",
   );
   assert(
-    deferredStatus.includes("deferred - 2/3 slots used"),
-    "waiting status should show the gate deferral and occupied slots",
+    deferredStatus === undefined,
+    "deferral must not reintroduce footer text",
   );
 
   const xaiCalls: UiCall[] = [];
@@ -3897,8 +3898,8 @@ function deepEqualExcept<Actual, Expected>(
     "manual-only capability should show a warning widget badge",
   );
   assert(
-    String(manualStatus).includes("manual only"),
-    "manual-only capability should show a warning status badge",
+    manualStatus === undefined,
+    "manual-only capability must not show a duplicate footer badge",
   );
   renderManualOnlyUi(
     capabilityCtx,
@@ -3912,10 +3913,10 @@ function deepEqualExcept<Actual, Expected>(
     true,
   );
   assert(
-    String(capabilityCalls.filter((call) => call.kind === "status").at(-1)?.value).includes(
-      "/warm now ready",
+    String(capabilityCalls.filter((call) => call.kind === "widget").at(-1)?.value).includes(
+      "/warm now probe ready",
     ),
-    "manual-only status should identify a ready one-shot probe",
+    "manual-only widget should identify a ready one-shot probe",
   );
   renderCapabilityNotice(capabilityCtx, {
     state: "unsupported",
@@ -3948,9 +3949,14 @@ function deepEqualExcept<Actual, Expected>(
     "showWidget=false must clear widget output for every UI state",
   );
   assert(
-    hiddenCalls.filter((call) => call.kind === "status").length === 6,
-    "the compact status line should remain available when only the widget is hidden",
+    hiddenCalls.filter((call) => call.kind === "status").every((call) => call.value === undefined),
+    "hiding the widget must not move warming text into the footer",
   );
+  renderRefreshingUi(ctx, DEFAULT_CONFIG);
+  assert(String(calls.filter((call) => call.kind === "widget").at(-1)?.value).includes("Refreshing cache"), "in-flight probe belongs in the existing widget");
+  assert(calls.filter((call) => call.kind === "status").at(-1)?.value === undefined, "in-flight probe must keep the footer clear");
+  renderRefreshingUi(hiddenCtx, hiddenConfig);
+  assert(hiddenCalls.every((call) => call.value === undefined), "hidden refresh must remain hidden");
 }
 
 // 17) Slice 5 idle-cutoff math, maxidle=/spend= token parsing, and the
@@ -5080,10 +5086,10 @@ function deepEqualExcept<Actual, Expected>(
   assert(!goUiText.includes("xAI"), "Go UI must never render the xAI label");
   const goStatus = goUiCalls
     .filter((call) => call.kind === "status")
-    .map((call) => String(call.value));
+    .map((call) => call.value);
   assert(
-    goStatus.some((status) => status.startsWith("OpenCode Go best-effort · Cache warming active")),
-    "Go status must carry the Go label prefix",
+    goStatus.every((status) => status === undefined),
+    "Go renders its label only in the widget, leaving the footer clear",
   );
 
   // xAI waiting/hit lines stay byte-identical when the same renderers compute
@@ -5130,10 +5136,10 @@ function deepEqualExcept<Actual, Expected>(
   );
   const xaiPinStatus = xaiPinCalls
     .filter((call) => call.kind === "status")
-    .map((call) => String(call.value));
+    .map((call) => call.value);
   assert(
-    xaiPinStatus.some((status) => status.startsWith("xAI best-effort · Cache warming active")),
-    "xai status must stay byte-identical",
+    xaiPinStatus.every((status) => status === undefined),
+    "xAI warming must leave the footer clear",
   );
 
   // An explicit non-xai label wins over "xai" in detail text (the
@@ -5668,7 +5674,7 @@ function deepEqualExcept<Actual, Expected>(
   rmSync(directory, { recursive: true, force: true });
 }
 
-// Busy transitions replace the cancelled countdown on both UI surfaces.
+// Busy transitions replace the editor countdown and leave the footer clear.
 {
   let widget: string[] | undefined;
   let status = "";
@@ -5687,7 +5693,7 @@ function deepEqualExcept<Actual, Expected>(
   const payload = { model: "gpt-5.6", input: [], prompt_cache_key: "standby-ui" };
   const standby = (reason = "Agent working") => {
     assert(widget?.[0] === `⚡ Cache warming standby · ${reason}`, "widget must replace cancelled countdown with its standby reason");
-    assert(status === `Cache warming standby · ${reason}`, "status must agree with standby widget");
+    assert(status === "", "standby must leave the footer clear");
     assert(warmer.getStatusText().includes("nextDue=none"), "standby must have no scheduled refresh");
   };
   try {
@@ -5695,7 +5701,7 @@ function deepEqualExcept<Actual, Expected>(
     warmer.capturePayload(payload, ctx);
     warmer.noteAssistantUsage(ctx, { cacheRead: 2000 });
     warmer.onAgentSettled(ctx);
-    assert(status.includes("Next refresh in"), "idle session must schedule warming");
+    assert(widget?.some((line) => line.includes("Next refresh in")), "idle session must schedule warming");
     idle = false;
     warmer.onAgentStart(ctx);
     standby();
@@ -5705,22 +5711,22 @@ function deepEqualExcept<Actual, Expected>(
     warmer.onAssistantMessageEnd(ctx);
     warmer.noteAssistantUsage(ctx, { cacheRead: 2000 });
     warmer.onToolExecutionStart({ toolCallId: "build", toolName: "bash", args: { command: "./gradlew build" } }, ctx);
-    assert(status.includes("Next refresh in"), "eligible tool must restore countdown");
+    assert(widget?.some((line) => line.includes("Next refresh in")), "eligible tool must restore countdown");
     warmer.onToolExecutionStart({ toolCallId: "other", toolName: "read", args: {} }, ctx);
     standby("Parallel tool not eligible");
     warmer.onToolExecutionEnd({ toolCallId: "other" }, ctx);
-    assert(status.includes("Next refresh in"), "remaining eligible tool must restore countdown");
+    assert(widget?.some((line) => line.includes("Next refresh in")), "remaining eligible tool must restore countdown");
     warmer.onToolExecutionEnd({ toolCallId: "build" }, ctx);
     standby();
     warmer.setConfig({ ...DEFAULT_CONFIG, warmAllTools: false });
     warmer.onToolExecutionStart({ toolCallId: "toggle", toolName: "bash", args: { command: "./gradlew test" } }, ctx);
     standby("Tool warming off");
     warmer.setConfig({ ...warmer.getConfig(), warmDuringTools: ["gradle"] });
-    assert(status.includes("Next refresh in"), "enabling Gradle must reclassify a running tool without restarting it");
+    assert(widget?.some((line) => line.includes("Next refresh in")), "enabling Gradle must reclassify a running tool without restarting it");
     const dueBeforeToggle = nextDueAtMs(warmer.getStatusText());
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: true });
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: false });
-    assert(status.includes("Next refresh in"), "switching all back to Gradle must keep a matching tool eligible");
+    assert(widget?.some((line) => line.includes("Next refresh in")), "switching all back to Gradle must keep a matching tool eligible");
     assert(nextDueAtMs(warmer.getStatusText()) === dueBeforeToggle, "policy toggles must preserve tool start and refresh deadline");
     warmer.onProviderRequestStart({ ...payload, input: [{ role: "user", content: "new request" }] }, ctx);
     warmer.onAssistantMessageEnd(ctx);
@@ -5730,7 +5736,7 @@ function deepEqualExcept<Actual, Expected>(
     standby("Cache anchor changed during tool execution");
     warmer.onToolExecutionEnd({ toolCallId: "toggle" }, ctx);
     warmer.setConfig({ ...warmer.getConfig(), showWidget: false });
-    assert(widget === undefined && status.includes("standby"), "hidden widget must stay hidden in standby");
+    assert(widget === undefined && status === "", "hidden widget must stay hidden without footer fallback");
   } finally {
     warmer.dispose();
   }
