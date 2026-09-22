@@ -89,8 +89,8 @@ export type CacheFamily =
 
 export type AnthropicTtlMode = "5m" | "1h" | "auto";
 
-/** Built-in command classifiers that may warm while the matching tool runs. */
-export type ToolWarmPreset = "gradle";
+/** Built-in command presets or exact Pi tool names allowed during tool runs. */
+export type ToolWarmPreset = string;
 
 export interface WarmCacheConfig {
   /** Opt-in, version-scoped rpiv-advisor independent request warming. */

@@ -891,8 +891,7 @@ function deepEqualExcept<Actual, Expected>(
 
   // OpenCode Go: per-api proxy route registry with exact baseUrl paths.
   {
-    // Drive the gate from the Pi 0.85.1 registry so every catalog route is
-    // exercised: 2 anthropic-messages, 21 completions, 4 responses.
+    // Exercise every installed catalog route without pinning a moving model count.
     const registryPath = join(
       dirname(fileURLToPath(import.meta.url)),
       "..",
@@ -913,8 +912,8 @@ function deepEqualExcept<Actual, Expected>(
       }
     }
     assert(
-      goModels.length === 27,
-      `expected 27 OpenCode Go registry models, got ${goModels.length}`,
+      goModels.length > 0,
+      "OpenCode Go registry must not be empty",
     );
     const goApiCounts: Record<string, number> = {};
     for (const model of goModels) {
@@ -955,7 +954,7 @@ function deepEqualExcept<Actual, Expected>(
             capability.reason.includes("keepalive is not needed"),
           `opencode-go ${model.id} reason must state the verified no-keepalive claim`,
         );
-      } else {
+      } else if (model.api === "openai-responses") {
         // (openai-responses, plain) is verified with probing at ~4m cadence.
         assert(
           capability.state === "verified",
@@ -973,6 +972,8 @@ function deepEqualExcept<Actual, Expected>(
           capability.reason.includes("verified"),
           `opencode-go ${model.id} reason must state the verified claim`,
         );
+      } else {
+        assert(false, `unhandled OpenCode Go API: ${model.api}/${model.id}`);
       }
       const expectedPath = model.api === "anthropic-messages" ? "/zen/go" : "/zen/go/v1";
       assert(
@@ -980,11 +981,11 @@ function deepEqualExcept<Actual, Expected>(
         `opencode-go ${model.id} should register the exact ${expectedPath} baseUrl`,
       );
     }
-    assert(goApiCounts["anthropic-messages"] === 2, "expected 2 anthropic-messages models");
-    assert(goApiCounts["openai-completions"] === 21, "expected 21 openai-completions models");
-    assert(goApiCounts["openai-responses"] === 4, "expected 4 openai-responses models");
+    for (const api of ["anthropic-messages", "openai-completions", "openai-responses"]) {
+      assert(goApiCounts[api] > 0, `OpenCode Go registry must exercise ${api}`);
+    }
 
-    // The single responses model carries the registered routing metadata and
+    // A representative responses model carries the registered routing metadata and
     // resolves through its exact path; the anthropic-messages models need no
     // compat at all.
     const goGrok = modelFixture({
@@ -5295,10 +5296,15 @@ function deepEqualExcept<Actual, Expected>(
   rmSync(cwd, { recursive: true, force: true });
 }
 
-// Tool-aware warming: Gradle is opt-in, command-aware, fenced, and bounded.
+// Tool-aware warming: named tools and the Gradle preset are opt-in, fenced, and bounded.
 {
-  const configured = parseConfigArgs("tools=gradle toolmin=2m toolmax=4");
-  assert(configured.warmDuringTools.length === 1 && configured.warmDuringTools[0] === "gradle", "tools=gradle should enable the Gradle preset");
+  const configured = parseConfigArgs("tools=gradle,ask_user_question toolmin=2m toolmax=4");
+  assert(
+    configured.warmDuringTools.length === 2 &&
+      configured.warmDuringTools[0] === "gradle" &&
+      configured.warmDuringTools[1] === "ask_user_question",
+    "tools= should preserve the Gradle preset and exact tool names",
+  );
   assert(configured.toolWarmMinRuntimeMs === 120_000, "toolmin should parse a duration");
   assert(configured.toolWarmMaxProbes === 4, "toolmax should parse a positive integer");
   assert(
@@ -5313,7 +5319,26 @@ function deepEqualExcept<Actual, Expected>(
     matchToolWarmPreset("bash", { command: "./gradlew test" }, []) === null,
     "tool warming must remain opt-in",
   );
+  assert(
+    matchToolWarmPreset("ask_user_question", {}, ["ask_user_question"]) === "ask_user_question",
+    "an exact configured tool name should be eligible",
+  );
+  assert(
+    matchToolWarmPreset("ASK_USER_QUESTION", {}, ["ask_user_question"]) === "ask_user_question",
+    "exact tool matching should be case-insensitive",
+  );
+  assert(
+    matchToolWarmPreset("ask_user_question", {}, ["gradle"]) === null,
+    "unlisted tool names must remain blocked",
+  );
+}
 
+// Run the same lifecycle against both command presets and commandless named tools.
+for (const tool of [
+  { target: "gradle", toolName: "bash", args: { command: "./gradlew build" } },
+  { target: "ask_user_question", toolName: "ask_user_question", args: {} },
+  { target: "ask_user_question", toolName: "ASK_USER_QUESTION", args: {} },
+]) {
   const cwd = mkdtempSync(join(tmpdir(), "pi-warm-cache-tool-aware-"));
   const model = modelFixture({
     id: "gpt-5.6",
@@ -5349,7 +5374,7 @@ function deepEqualExcept<Actual, Expected>(
     ...DEFAULT_CONFIG,
     minCachedTokens: 10,
     intervalMs: 60_000,
-    warmDuringTools: ["gradle"],
+    warmDuringTools: [tool.target],
     warmAllTools: false,
     toolWarmMinRuntimeMs: 0,
     toolWarmMaxProbes: 1,
@@ -5357,29 +5382,33 @@ function deepEqualExcept<Actual, Expected>(
   warmer.capturePayload(payload, ctx);
   warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
   warmer.onToolExecutionStart(
-    { toolCallId: "gradle-1", toolName: "bash", args: { command: "./gradlew build" } },
+    { toolCallId: "allowed-1", toolName: tool.toolName, args: tool.args },
     ctx,
   );
+  assert(!warmer.getStatusText().includes("nextDue=none"), `${tool.toolName} must schedule a refresh`);
   const inTool = await runTimerWarm(warmer);
-  assert(inTool.ok && calls === 1, "an allowlisted Gradle execution should permit a busy-agent timer probe");
+  assert(inTool.ok && calls === 1, `${tool.toolName} should permit a busy-agent timer probe`);
 
   const bounded = await runTimerWarm(warmer);
   assert(!bounded.ok && calls === 1, "toolmax must prevent another provider probe in the same tool batch");
-  warmer.onToolExecutionEnd({ toolCallId: "gradle-1" }, ctx);
+  warmer.onToolExecutionEnd({ toolCallId: "allowed-1" }, ctx);
+  assert(warmer.getStatusText().includes("nextDue=none"), "tool completion must clear the refresh timer");
+  const ended = await runTimerWarm(warmer);
+  assert(!ended.ok && calls === 1, "a completed tool must not permit busy-agent probes");
 
   warmer.onToolExecutionStart(
-    { toolCallId: "gradle-2", toolName: "bash", args: { command: "./gradlew test" } },
+    { toolCallId: "allowed-2", toolName: tool.toolName, args: tool.args },
     ctx,
   );
   warmer.onProviderRequestStart({ ...payload, prompt_cache_key: "changed-during-tool" }, ctx);
   const fenced = await runTimerWarm(warmer);
   assert(!fenced.ok && calls === 1, "a new provider payload must fence off the running tool's old anchor");
-  warmer.onToolExecutionEnd({ toolCallId: "gradle-2" }, ctx);
+  warmer.onToolExecutionEnd({ toolCallId: "allowed-2" }, ctx);
 
   warmer.capturePayload(payload, ctx);
   warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
   warmer.onToolExecutionStart(
-    { toolCallId: "gradle-3", toolName: "bash", args: { command: "./gradlew build" } },
+    { toolCallId: "allowed-3", toolName: tool.toolName, args: tool.args },
     ctx,
   );
   warmer.onToolExecutionStart(
@@ -5388,6 +5417,13 @@ function deepEqualExcept<Actual, Expected>(
   );
   const siblingBlocked = await runTimerWarm(warmer);
   assert(!siblingBlocked.ok && calls === 1, "an unallowlisted parallel sibling must block in-tool warming");
+  assert(warmer.getStatusText().includes("nextDue=none"), "an unlisted sibling must clear the refresh timer");
+  warmer.onToolExecutionEnd({ toolCallId: "unsafe-sibling" }, ctx);
+  assert(!warmer.getStatusText().includes("nextDue=none"), "ending the unlisted sibling must restore the refresh timer");
+  const resumed = await runTimerWarm(warmer);
+  assert(resumed.ok && Number(calls) === 2, "remaining eligible tool must resume warming with a fresh batch allowance");
+  warmer.onToolExecutionEnd({ toolCallId: "allowed-3" }, ctx);
+  assert(warmer.getStatusText().includes("nextDue=none"), "ending the final tool must clear the refresh timer");
 
   warmer.dispose();
   rmSync(cwd, { recursive: true, force: true });
@@ -5452,15 +5488,20 @@ function deepEqualExcept<Actual, Expected>(
 
 // Persistent JSON defaults are distinct from runtime on/off overrides.
 {
-  const text = JSON.stringify({enabled: false, warmDuringTools: ["gradle"], toolWarmMinRuntimeMs: 180000, toolWarmMaxProbes: 6});
+  const text = JSON.stringify({enabled: false, warmDuringTools: ["gradle", "ask_user_question"], toolWarmMinRuntimeMs: 180000, toolWarmMaxProbes: 6});
   const config = parseConfigJson(text);
   const on = parseConfigArgs("on", config);
   const off = parseConfigArgs("off", on);
-  assert(on.enabled && !off.enabled && off.warmDuringTools[0] === "gradle", "toggle must preserve JSON policy");
+  assert(
+    on.enabled && !off.enabled &&
+      off.warmDuringTools[0] === "gradle" &&
+      off.warmDuringTools[1] === "ask_user_question",
+    "toggle must preserve JSON tool-name policy",
+  );
   assert(on.intervalMs === 240_000, "omitted JSON values must inherit the four-minute default");
   assert(parseConfigJson('{"intervalMs":null}').intervalMs === null, "explicit null must preserve provider automatic cadence");
   assert(parseConfigJson('{"intervalMs":120000}').intervalMs === 120_000, "saved custom intervals must remain respected");
-  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":["browser"]}', '{"typo":true}', '{"__proto__":{}}']) {
+  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"typo":true}', '{"__proto__":{}}']) {
     let rejected = false;
     try { parseConfigJson(bad); } catch { rejected = true; }
     assert(rejected, `invalid JSON must be rejected atomically: ${bad}`);
@@ -5470,7 +5511,11 @@ function deepEqualExcept<Actual, Expected>(
     const path = join(directory, "warm-cache.json");
     assert(loadConfigJson(path).error === undefined, "missing file must remain optional");
     writeFileSync(path, text);
-    assert(loadConfigJson(path).config.warmDuringTools[0] === "gradle", "loader must read the supplied file");
+    assert(
+      loadConfigJson(path).config.warmDuringTools[0] === "gradle" &&
+        loadConfigJson(path).config.warmDuringTools[1] === "ask_user_question",
+      "loader must read named tools from the supplied file",
+    );
     parseConfigArgs("on", loadConfigJson(path).config);
     assert(readFileSync(path, "utf8") === text, "runtime toggle must not write user configuration");
     writeFileSync(path, '{"enabled":true,"toolWarmMaxProbes":-2}');

@@ -268,7 +268,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
 | `log` / `nolog` | Local JSONL log | off |
-| `tools=` | Tool policy: `all`, `gradle`, or `off` | all |
+| `tools=` | Tool policy: `all`, an exact tool name, `gradle`, or `off` | all |
 | `tools=all` | Allow all tool names and commands (`warmAllTools: true` in JSON) | on |
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
@@ -279,10 +279,10 @@ An existing saved `"warmAllTools": false` remains respected; use `/warm tools=al
 to enable and save the new policy in an existing installation.
 This overrides the `warmDuringTools` allowlist, including for parallel tools.
 Use `/warm on` and `/warm off` as usual; the policy is preserved.
-Use `/warm tools=all`; `/warm tools=gradle`
-returns to Gradle-only and `/warm tools=off` disables tool warming but leaves
-idle warming enabled if the master switch is on. All-tools mode does not
-itself enable the master switch.
+Use `/warm tools=all`; `/warm tools=gradle`; or
+`/warm tools=ask_user_question` to select the matching policy. `/warm tools=off`
+disables tool warming but leaves idle warming enabled if the master switch is on.
+All-tools mode does not itself enable the master switch.
 
 The minimum runtime, probe count, idle cutoff, spend/route gates and payload
 revision fencing still apply. Tools must actually be executing; model
@@ -292,6 +292,9 @@ the parent extension cannot observe. Use `/warm tools=gradle` to narrow the poli
 or `/warm tools=off` to disable tool warming. The extension never executes tool
 calls returned by a warm probe.
 
+`warmDuringTools` also accepts exact Pi tool names, such as
+`"ask_user_question"`. Exact names are matched case-insensitively. When
+`warmAllTools` is `false`, only the configured names and presets are eligible.
 The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
 command with plain arguments, optionally prefixed by `cd android &&` (or
 another literal directory). Quoted arguments, substitutions, pipelines,

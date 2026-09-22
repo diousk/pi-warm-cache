@@ -1,4 +1,4 @@
-import { DEFAULT_CONFIG, type ToolWarmPreset, type WarmCacheConfig } from "./types.ts";
+import { DEFAULT_CONFIG, type WarmCacheConfig } from "./types.ts";
 import { readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
@@ -42,7 +42,10 @@ export function parseConfigJson(text: string): WarmCacheConfig {
     else if (key === "warmSpendCeilingUsd") valid = value === null || (Number.isFinite(value) && Number(value) >= 0);
     else if (key === "anthropicTtl") valid = value === "auto" || value === "5m" || value === "1h";
     else if (key === "warmSuffix") valid = Object.prototype.toString.call(value) === "[object String]";
-    else if (key === "warmDuringTools") valid = Array.isArray(value) && value.every((item) => item === "gradle");
+    else if (key === "warmDuringTools") {
+      valid = Array.isArray(value) && value.every((item) =>
+        Object.prototype.toString.call(item) === "[object String]" && isToolWarmName(item));
+    }
     if (!valid) throw new Error(`invalid or unknown configuration field: ${key}`);
     Object.assign(next, { [key]: value });
   }
@@ -68,8 +71,9 @@ export function loadConfigJson(path = warmCacheConfigPath()): LoadedConfig {
   }
 }
 
-function isToolWarmPreset(value: string): value is ToolWarmPreset {
-  return value === "gradle";
+/** Tool names are single config tokens; command syntax belongs to the gradle preset. */
+function isToolWarmName(value: string): boolean {
+  return value.length > 0 && !/\s|,/.test(value);
 }
 
 export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CONFIG): WarmCacheConfig {
@@ -173,7 +177,7 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
         next.warmAllTools = true;
       } else {
         next.warmAllTools = false;
-        next.warmDuringTools = requested.filter(isToolWarmPreset);
+        next.warmDuringTools = requested.filter(isToolWarmName);
       }
       continue;
     }
