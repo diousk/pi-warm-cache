@@ -196,14 +196,20 @@ function toolCommand(args: ToolCommandArgs): string | null {
   return args.command ?? args.cmd ?? null;
 }
 
-/** Classify an executing Pi tool using both its tool name and shell command. */
+/**
+ * Classify an executing Pi tool using exact configured names and the special
+ * Gradle command preset. Exact names are case-insensitive; the configured
+ * spelling is returned for status/debugging.
+ */
 export function matchToolWarmPreset(
   toolName: string,
   args: ToolCommandArgs,
   enabledPresets: readonly ToolWarmPreset[],
 ): ToolWarmPreset | null {
-  if (!enabledPresets.includes("gradle")) return null;
   const normalizedName = toolName.trim().toLowerCase();
+  const exact = enabledPresets.find((target) => target.trim().toLowerCase() === normalizedName);
+  if (exact !== undefined) return exact;
+  if (!enabledPresets.some((target) => target.trim().toLowerCase() === "gradle")) return null;
   if (normalizedName === "gradle") return "gradle";
   if (normalizedName !== "bash" && normalizedName !== "shell" && normalizedName !== "exec") {
     return null;

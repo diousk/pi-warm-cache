@@ -214,6 +214,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         ["now", "Refresh cache once"],
         ["resume", "Clear the automatic warming block"],
         ["tools=gradle", "Warm during long Gradle builds"],
+        ["tools=ask_user_question", "Warm during the named ask_user_question tool"],
         ["tools=all", "Warm during any long tool execution"],
         ["tools=off", "Warm only between agent turns"],
         ["toolmin=3m", "Wait 3 minutes before warming during tools"],
@@ -246,7 +247,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       return items.length > 0 ? items : null;
     },
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {

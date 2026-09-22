@@ -5289,10 +5289,15 @@ function deepEqualExcept<Actual, Expected>(
   rmSync(cwd, { recursive: true, force: true });
 }
 
-// Tool-aware warming: Gradle is opt-in, command-aware, fenced, and bounded.
+// Tool-aware warming: named tools and the Gradle preset are opt-in, fenced, and bounded.
 {
-  const configured = parseConfigArgs("tools=gradle toolmin=2m toolmax=4");
-  assert(configured.warmDuringTools.length === 1 && configured.warmDuringTools[0] === "gradle", "tools=gradle should enable the Gradle preset");
+  const configured = parseConfigArgs("tools=gradle,ask_user_question toolmin=2m toolmax=4");
+  assert(
+    configured.warmDuringTools.length === 2 &&
+      configured.warmDuringTools[0] === "gradle" &&
+      configured.warmDuringTools[1] === "ask_user_question",
+    "tools= should preserve the Gradle preset and exact tool names",
+  );
   assert(configured.toolWarmMinRuntimeMs === 120_000, "toolmin should parse a duration");
   assert(configured.toolWarmMaxProbes === 4, "toolmax should parse a positive integer");
   assert(
@@ -5306,6 +5311,18 @@ function deepEqualExcept<Actual, Expected>(
   assert(
     matchToolWarmPreset("bash", { command: "./gradlew test" }, []) === null,
     "tool warming must remain opt-in",
+  );
+  assert(
+    matchToolWarmPreset("ask_user_question", {}, ["ask_user_question"]) === "ask_user_question",
+    "an exact configured tool name should be eligible",
+  );
+  assert(
+    matchToolWarmPreset("ASK_USER_QUESTION", {}, ["ask_user_question"]) === "ask_user_question",
+    "exact tool matching should be case-insensitive",
+  );
+  assert(
+    matchToolWarmPreset("ask_user_question", {}, ["gradle"]) === null,
+    "unlisted tool names must remain blocked",
   );
 
   const cwd = mkdtempSync(join(tmpdir(), "pi-warm-cache-tool-aware-"));
@@ -5446,15 +5463,20 @@ function deepEqualExcept<Actual, Expected>(
 
 // Persistent JSON defaults are distinct from runtime on/off overrides.
 {
-  const text = JSON.stringify({enabled: false, warmDuringTools: ["gradle"], toolWarmMinRuntimeMs: 180000, toolWarmMaxProbes: 6});
+  const text = JSON.stringify({enabled: false, warmDuringTools: ["gradle", "ask_user_question"], toolWarmMinRuntimeMs: 180000, toolWarmMaxProbes: 6});
   const config = parseConfigJson(text);
   const on = parseConfigArgs("on", config);
   const off = parseConfigArgs("off", on);
-  assert(on.enabled && !off.enabled && off.warmDuringTools[0] === "gradle", "toggle must preserve JSON policy");
+  assert(
+    on.enabled && !off.enabled &&
+      off.warmDuringTools[0] === "gradle" &&
+      off.warmDuringTools[1] === "ask_user_question",
+    "toggle must preserve JSON tool-name policy",
+  );
   assert(on.intervalMs === 240_000, "omitted JSON values must inherit the four-minute default");
   assert(parseConfigJson('{"intervalMs":null}').intervalMs === null, "explicit null must preserve provider automatic cadence");
   assert(parseConfigJson('{"intervalMs":120000}').intervalMs === 120_000, "saved custom intervals must remain respected");
-  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":["browser"]}', '{"typo":true}', '{"__proto__":{}}']) {
+  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"typo":true}', '{"__proto__":{}}']) {
     let rejected = false;
     try { parseConfigJson(bad); } catch { rejected = true; }
     assert(rejected, `invalid JSON must be rejected atomically: ${bad}`);
@@ -5464,7 +5486,11 @@ function deepEqualExcept<Actual, Expected>(
     const path = join(directory, "warm-cache.json");
     assert(loadConfigJson(path).error === undefined, "missing file must remain optional");
     writeFileSync(path, text);
-    assert(loadConfigJson(path).config.warmDuringTools[0] === "gradle", "loader must read the supplied file");
+    assert(
+      loadConfigJson(path).config.warmDuringTools[0] === "gradle" &&
+        loadConfigJson(path).config.warmDuringTools[1] === "ask_user_question",
+      "loader must read named tools from the supplied file",
+    );
     parseConfigArgs("on", loadConfigJson(path).config);
     assert(readFileSync(path, "utf8") === text, "runtime toggle must not write user configuration");
     writeFileSync(path, '{"enabled":true,"toolWarmMaxProbes":-2}');
