@@ -7,7 +7,37 @@ That cache expires if you leave the session idle.
 The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
-It requires [Pi](https://github.com/badlogic/pi-mono) 0.85.1 or newer.
+The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
+CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, and the latest
+stable release on each push to main and pull request. The latest job resolves one
+version for all three Pi packages. Development dependencies remain pinned to
+0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
+releases are considered validated only after their compatibility checks pass.
+
+### Pi 0.86 native cache warming
+
+When this extension is enabled on a verified route, it owns automatic warming
+and returns `stop` from Pi's `cache_warming_decision` event. Ownership remains
+with the extension when its spend, failure, tool, or retention policy pauses
+probes, so native warming cannot bypass those limits. Pi 0.85.1 stores the
+event handler without emitting it; its scheduling behavior is unchanged.
+
+When the extension is disabled or the route is not verified, Pi 0.86 may warm
+according to its own `cacheWarming` setting. `/warm off` only disables this
+extension. To disable both warmers, also set `"cacheWarming": "off"` in Pi's
+global settings. This extension never changes that setting. `/warm status`
+shows who owns warming; ownership does not mean a probe is currently scheduled.
+
+Native warming reuses the provider-request hook without starting an agent turn.
+The extension fences requests following a native decision until the next real
+turn, so native probes do not reset its anchor, idle cutoff, or spend ledger.
+Pi uses the last decision override: another extension loaded later can override
+our `stop`. Avoid competing decision handlers, or disable Pi's native warmer
+explicitly when strict single-warmer ownership is required.
+
+Advisor recognition resolves the effective prompt and tools through Pi 0.86's
+transcript helpers when available, with the 0.85.1 fields as fallback. Custom
+prompts and effective nonempty tool inventories still fail closed.
 
 ## How it works
 
@@ -294,12 +324,14 @@ do not toggle warming, reset counters, change timers or send a probe.
 
 `/warm` shows whether warming is active, the current route, the next probe time, and a savings summary.
 
-The live widget shows `Cache warming active` and an integer minutes/seconds
-countdown such as `Next refresh in 2m 45s`, updated every 15 seconds.
-While the agent is working without an eligible tool-warming schedule, both the
-widget and status line show `Cache warming standby · Agent working`. Warming
-remains enabled and resumes automatically when eligible; cancelled countdowns
-are removed from both surfaces.
+The single live widget above the input field shows `Cache warming active` and
+an integer minutes/seconds countdown such as `Next refresh in 2m 45s`, updated
+every 15 seconds. No duplicate warming text is shown in the bottom status bar.
+While the agent is working without an eligible tool-warming schedule, the widget
+shows `Cache warming standby · Agent working`. Warming remains enabled and resumes
+automatically when eligible; cancelled countdowns are replaced in the widget.
+`showWidget: false` (or `/warm nowidget`) hides the persistent warming UI entirely;
+`/warm status` remains available for on-demand diagnostics.
 During tools, standby explains why no refresh is scheduled: tool warming is off,
 a tool (including a parallel sibling) is not eligible, the tool refresh limit
 was reached, or the cache anchor changed. Changing `/warm tools=…` immediately

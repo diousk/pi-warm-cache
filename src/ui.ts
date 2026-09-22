@@ -17,6 +17,15 @@ export function clearWarmUi(ctx: ExtensionContext): void {
   ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
+/** Replace the countdown while the probe is in flight; never use the footer. */
+export function renderRefreshingUi(ctx: ExtensionContext, config: Pick<WarmCacheConfig, "showWidget">): void {
+  if (!ctx.hasUI) return;
+  ctx.ui.setWidget(WIDGET_ID, config.showWidget
+    ? [ctx.ui.theme.fg("dim", "⚡ Refreshing cache…")]
+    : undefined);
+  ctx.ui.setStatus(STATUS_ID, undefined);
+}
+
 /** Keep a manual-only route visible without implying that a timer is active. */
 export function renderManualOnlyUi(
   ctx: ExtensionContext,
@@ -48,13 +57,7 @@ export function renderManualOnlyUi(
   } else {
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
-  ctx.ui.setStatus(
-    STATUS_ID,
-    ctx.ui.theme.fg(
-      "warning",
-      `${xai ? "xAI best-effort " : ""}warm · manual only${probeReady ? " · /warm now ready" : " · waiting for payload"}`,
-    ),
-  );
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 /** Explain a rejected route and keep an eligible manual-only route visible. */
@@ -108,8 +111,7 @@ export function renderWaitingUi(
       ? `deferred - ${deferral.activeWarmSessions}/${deferral.maxConcurrentWarmSessions} slots used`
       : `deferred - ${formatDeferralStatus(deferral)}`
     : ratio;
-  // showWidget controls the editor widget only. The status line remains available
-  // as the compact extension surface when the widget is hidden.
+  // The editor widget is the only persistent warming surface.
   const lines = [
     ctx.ui.theme.fg(
       "accent",
@@ -125,13 +127,7 @@ export function renderWaitingUi(
   } else {
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
-  ctx.ui.setStatus(
-    STATUS_ID,
-    ctx.ui.theme.fg(
-      "dim",
-      `${label ? `${label} · ` : ""}Cache warming active · Next refresh in ${waitLabel}${waitDetail ? ` · ${waitDetail}` : ""}`,
-    ),
-  );
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 export function formatDeferralStatus(deferral: WarmDeferralState): string {
@@ -173,13 +169,7 @@ export function renderWarmHitUi(
   } else {
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
-  ctx.ui.setStatus(
-    STATUS_ID,
-    ctx.ui.theme.fg(
-      "success",
-      `${label ? `${label} · ` : ""}Cache refreshed · ${nextLabel}${ratio ? ` · ${ratio}` : ""}`,
-    ),
-  );
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 /**
@@ -219,10 +209,7 @@ export function renderIdleUi(
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
 
-  ctx.ui.setStatus(
-    STATUS_ID,
-    ctx.ui.theme.fg("dim", `${title}${reason === "agent working" ? " " : " · "}${state}`),
-  );
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 /**
@@ -248,7 +235,7 @@ export function renderReanchorUi(
   } else {
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
-  ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("dim", `${prefix}warm · re-anchoring`));
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 /**
@@ -280,7 +267,7 @@ export function renderProbeRetryUi(
   } else {
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
-  ctx.ui.setStatus(STATUS_ID, ctx.ui.theme.fg("dim", `${xai ? "xAI best-effort " : ""}warm · retrying probe`));
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 /**
@@ -322,13 +309,7 @@ export function renderFailureUi(
     ctx.ui.setWidget(WIDGET_ID, undefined);
   }
 
-  ctx.ui.setStatus(
-    STATUS_ID,
-    ctx.ui.theme.fg(
-      statusKind,
-      `${prefix}warm · ${error ? "error" : "warning"}: ${shortProblem(reason)}`,
-    ),
-  );
+  ctx.ui.setStatus(STATUS_ID, undefined);
 }
 
 function formatDurationShort(ms: number): string {
