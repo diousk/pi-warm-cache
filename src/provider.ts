@@ -587,7 +587,7 @@ export function classifyProbeOutcome(args: {
   // a re-anchor candidate instead of an endless replay loop. The escalation
   // branch stays BEFORE the transient branch so a budget-exhausted result is
   // never mislabelled as a quiet retry.
-  const maxFailures = Math.max(1, args.maxConsecutiveFailures ?? 3);
+  const maxFailures = Math.max(1, args.maxConsecutiveFailures ?? 2);
   if (
     isBestEffortNoWriteFamily(args.cacheFamily) &&
     noReadNoWrite &&

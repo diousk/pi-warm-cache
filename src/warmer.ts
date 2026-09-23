@@ -45,6 +45,7 @@ import {
 import type { StrategyResolution } from "./provider.ts";
 import type {
   CacheAnchor,
+  CodexWarmMode,
   ProbeObservation,
   ProbeOutcome,
   ProviderCapability,
@@ -152,6 +153,8 @@ export interface SessionWarmerOptions {
   /** Replay Codex exactly when a side call must refresh its original endpoint. */
   exactCodexReplay?: boolean;
 }
+
+type EffectiveCodexReplayMode = Exclude<CodexWarmMode, "auto">;
 
 function resolveCompleteRequest(
   ctx: ExtensionContext,
@@ -374,12 +377,36 @@ export class SessionWarmer {
     return this.anchor?.capability ?? this.capability ?? resolveProviderCapability(context?.model);
   }
 
+  /**
+   * Resolve the effective Codex replay shape for the current anchor.
+   *
+   * `auto` deliberately starts with the bounded suffix. Once a comparable
+   * real-turn miss proves that branch is not reusable, capturePayload carries
+   * the learned exact mode into the next anchor. AdvisorWarmer bypasses this
+   * policy through its exactCodexReplay option because advisor prompts already
+   * constrain their own output.
+   */
+  private resolveCodexReplayMode(
+    model: ExtensionContext["model"],
+    previous?: CacheAnchor | null,
+    preservePrevious = false,
+  ): EffectiveCodexReplayMode | undefined {
+    if (model?.api !== "openai-codex-responses") return undefined;
+    if (this.options.exactCodexReplay || this.config.codexWarmMode === "exact") return "exact";
+    if (this.config.codexWarmMode === "suffix") return "suffix";
+    if (preservePrevious && previous?.codexReplayMode === "exact") return "exact";
+    return "suffix";
+  }
+
   getLogFile(): string | null {
     return this.logFile ?? (this.ctx ? warmLogPath(this.ctx.cwd) : null);
   }
 
   setConfig(config: WarmCacheConfig): void {
     this.config = { ...config };
+    if (this.anchor && this.ctx?.model?.api === "openai-codex-responses") {
+      this.anchor.codexReplayMode = this.resolveCodexReplayMode(this.ctx.model, this.anchor, true);
+    }
     // Re-evaluate the per-instance spend soft block when the ceiling changes:
     // raising the ceiling or disabling it (spend=0) resumes warming for this
     // instance, matching the documented spend=0 opt-out. A lowered ceiling
@@ -688,6 +715,7 @@ export class SessionWarmer {
     const capturedAt = Date.now();
     const manualProbeAvailable =
       this.capability.manualProbe && isSafeReplayPayload(this.lastPayload, model.api);
+    const codexReplayMode = this.resolveCodexReplayMode(model, prev, payloadContinuation);
 
     if (this.plan.longTtlDegradedReason && this.plan.longTtlDegradedReason !== this.lastLongTtlWarning) {
       this.lastLongTtlWarning = this.plan.longTtlDegradedReason;
@@ -739,6 +767,7 @@ export class SessionWarmer {
       manualProbeAvailable,
       cacheFamily: this.plan.family,
       cacheRetention: this.plan.cacheRetention,
+      codexReplayMode,
       payloadFingerprint,
       cacheKeyFingerprint,
       // These fields remain as compatibility aliases for the scheduler and
@@ -898,6 +927,32 @@ export class SessionWarmer {
       api: this.anchor.modelApi,
       payloadFingerprint: this.anchor.payloadFingerprint,
     });
+    const suffixBranchMiss =
+      this.anchor.modelApi === "openai-codex-responses" &&
+      this.config.codexWarmMode === "auto" &&
+      !this.options.exactCodexReplay &&
+      this.anchor.codexReplayMode === "suffix" &&
+      this.anchor.latestProbe?.outcome === "hit" &&
+      this.anchor.latestProbe.replayMode === "suffix" &&
+      observation.state === "miss";
+    if (suffixBranchMiss) {
+      this.anchor.codexReplayMode = "exact";
+      observation.reason =
+        "comparable continuation miss after suffix probe; next probe uses exact replay";
+      this.log({
+        event: "codex_replay_mode_changed",
+        source: "real_turn",
+        sessionId: this.anchor.sessionId,
+        provider: this.anchor.provider,
+        modelId: this.anchor.modelId,
+        api: this.anchor.modelApi,
+        cacheKeyFingerprint: this.anchor.cacheKeyFingerprint,
+        payloadFingerprint: this.anchor.payloadFingerprint,
+        previousMode: "suffix",
+        nextMode: "exact",
+        reason: observation.reason,
+      });
+    }
     this.anchor.latestRealTurn = observation;
     // Keep these legacy anchor fields useful for scheduling and integrations,
     // but do not use them as the probe counters or real-turn classification.
@@ -1100,12 +1155,16 @@ export class SessionWarmer {
     const toolWarm = this.config.warmAllTools || this.config.warmDuringTools.length > 0
       ? `toolWarm=${this.config.warmAllTools ? "all" : this.config.warmDuringTools.join(",")} min=${formatDurationShort(this.config.toolWarmMinRuntimeMs)} probes=${this.toolWarmProbeCount}/${this.config.toolWarmMaxProbes}`
       : "toolWarm=off";
+    const codexReplay = api === "openai-codex-responses"
+      ? `codexReplay=${anchor?.codexReplayMode ?? this.resolveCodexReplayMode(model, anchor) ?? "suffix"} policy=${this.config.codexWarmMode ?? "auto"}`
+      : "";
     const stableBlock = [
       `lifecycle=${this.lifecycleState}`,
       `capability=${capability.state}`,
       `capabilityReason=${capability.reason}`,
       `provider=${route}`,
       `api=${api}`,
+      codexReplay,
       xaiRoute ? "policy=xAI-best-effort" : "",
       `strategy=${strategy}`,
       `cadence=${cadence}`,
@@ -1513,6 +1572,7 @@ export class SessionWarmer {
     model: NonNullable<ExtensionContext["model"]>,
     outcome: ProbeOutcome,
     fingerprint: string,
+    replayMode?: EffectiveCodexReplayMode,
   ): ProbeObservation {
     anchor.probeCount += 1;
     if (anchor.savingsKnown && result.cacheHit) {
@@ -1552,6 +1612,7 @@ export class SessionWarmer {
       observedAt: Date.now(),
       error: result.error,
     };
+    if (replayMode) observation.replayMode = replayMode;
     anchor.latestProbe = observation;
     return observation;
   }
@@ -1561,6 +1622,7 @@ export class SessionWarmer {
     model: NonNullable<ExtensionContext["model"]>,
     fingerprint: string,
     error: string,
+    replayMode?: EffectiveCodexReplayMode,
   ): void {
     anchor.latestProbe = {
       outcome: "error",
@@ -1576,6 +1638,7 @@ export class SessionWarmer {
       observedAt: Date.now(),
       error,
     };
+    if (replayMode) anchor.latestProbe.replayMode = replayMode;
   }
 
   private recordAttempt(
@@ -2070,13 +2133,17 @@ export class SessionWarmer {
     const probeRevision = this.anchorRevision;
     if (inToolWarmWindow) this.toolWarmProbeCount += 1;
     const fingerprint = anchor.payloadFingerprint;
+    const codexReplayMode =
+      model.api === "openai-codex-responses"
+        ? anchor.codexReplayMode ?? this.resolveCodexReplayMode(model, anchor) ?? "suffix"
+        : undefined;
     let shouldRescheduleAfter = true;
 
     const unverifiedProbe = anchor.capability.state === "unverified";
     if (ctx.hasUI && !unverifiedProbe) {
       renderRefreshingUi(ctx, this.config);
     }
-    this.log({
+    const warmStartLog: Omit<WarmLogEvent, "ts"> & { event: string } = {
       event: "warm_start",
       source: "warm_probe",
       sessionId: anchor.sessionId,
@@ -2091,7 +2158,9 @@ export class SessionWarmer {
       family: anchor.cacheFamily,
       cacheKeyFingerprint: anchor.cacheKeyFingerprint,
       payloadFingerprint: fingerprint,
-    });
+    };
+    if (codexReplayMode) warmStartLog.replayMode = codexReplayMode;
+    this.log(warmStartLog);
 
     try {
       const response = await resolveCompleteRequest(ctx, this.completeRequest)(
@@ -2116,8 +2185,9 @@ export class SessionWarmer {
               throw new Error("probe superseded");
             }
             // 1) Clone last real payload (exact tools/system/history prefix).
-            // 2) Codex only: append constrained warm user turn so the model is
-            //    not asked to continue the agent trajectory (no output cap).
+            // 2) Codex suffix mode only: append a constrained warm user turn so
+            //    the model is not asked to continue the agent trajectory (no
+            //    output cap). Exact mode preserves the captured endpoint.
             //    Do NOT append on Anthropic: max_tokens already yields out≈1, and
             //    a second consecutive user role can 400 (roles must alternate).
             // 3) Apply API-legal output limits only.
@@ -2126,7 +2196,7 @@ export class SessionWarmer {
             const cloned = structuredClone(payload);
             const codex = model.api === "openai-codex-responses";
             const xaiBestEffort = anchor.cacheFamily === "xai-best-effort";
-            const warmPayload = codex && !this.options.exactCodexReplay
+            const warmPayload = codex && codexReplayMode === "suffix"
               ? appendWarmUserTurn(cloned, this.config.warmSuffix, model.api)
               : cloned;
             return xaiBestEffort
@@ -2174,7 +2244,7 @@ export class SessionWarmer {
             consecutiveFailuresBefore: anchor.consecutiveFailures,
             maxConsecutiveFailures: this.config.maxConsecutiveFailures,
           });
-      this.observeProbeResult(anchor, result, model, outcome, fingerprint);
+      this.observeProbeResult(anchor, result, model, outcome, fingerprint, codexReplayMode);
 
       if (unverifiedProbe) {
         const payloadDrift = outcome === "payload-drift";
@@ -2333,7 +2403,7 @@ export class SessionWarmer {
         : unverifiedProbe
           ? "unverified probe error"
           : "probe error";
-      this.observeProbeError(anchor, model, fingerprint, message);
+      this.observeProbeError(anchor, model, fingerprint, message, codexReplayMode);
       this.recordAttempt(
         reason,
         false,
@@ -2382,6 +2452,7 @@ function formatProbeStatus(observation: ProbeObservation | null): string {
     `in=${observation.input}`,
     `out=${observation.output}`,
     `cost=$${observation.costUsd.toFixed(4)}`,
+    observation.replayMode ? `replay=${observation.replayMode}` : "",
     `pfp=${observation.payloadFingerprint.slice(0, 8)}${observation.error ? ` error=${compactDiagnostic(observation.error)}` : ""})`,
   ]
     .filter(Boolean)

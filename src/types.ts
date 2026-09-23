@@ -70,6 +70,8 @@ export interface ProbeObservation {
   api: string;
   payloadFingerprint: string;
   observedAt: number;
+  /** Effective Codex replay mode used for this probe, when applicable. */
+  replayMode?: Exclude<CodexWarmMode, "auto">;
   error?: string;
 }
 
@@ -88,6 +90,9 @@ export type CacheFamily =
   | "unsupported";
 
 export type AnthropicTtlMode = "5m" | "1h" | "auto";
+
+/** How Codex warm probes replay the captured request. */
+export type CodexWarmMode = "auto" | "exact" | "suffix";
 
 /** Built-in command presets or exact Pi tool names allowed during tool runs. */
 export type ToolWarmPreset = string;
@@ -126,9 +131,9 @@ export interface WarmCacheConfig {
   warmSpendCeilingUsd: number | null;
   /** Show the editor widget while waiting / after a probe hit. */
   showWidget: boolean;
-  /** Append a tiny warm user turn instead of replaying the exact last prefix only. */
+  /** Warm user turn used only by Codex suffix replay; exact mode preserves the captured input. */
   warmSuffix: string;
-  /** Max output tokens on a warm request. Keep at 1. */
+  /** Max output tokens on capped warm requests. Codex ignores this because its endpoint rejects caps. */
   maxOutputTokens: number;
   /**
    * Write JSONL diagnostics to .pi/warm-cache.jsonl.
@@ -137,11 +142,17 @@ export interface WarmCacheConfig {
   logToFile: boolean;
   /**
    * Allow timer-based auto-warm on openai-codex-responses.
-   * Default true after measured timer ticks with Codex OK-suffix stayed cheap
-   * (e.g. read=39424 write=0 out=32). Sticky block still trips if out is huge.
+   * Default true. Replay shape is controlled separately by codexWarmMode;
+   * sticky block still trips if an uncapped exact replay is huge.
    * Disable with /warm codex-off.
    */
   allowCodexAutoWarm: boolean;
+  /**
+   * Codex replay policy. auto starts with a bounded suffix and switches to
+   * exact replay after a comparable real-turn miss proves the suffix branch is
+   * not reusable for the active route.
+   */
+  codexWarmMode: CodexWarmMode;
   /** Opt-in command presets allowed to warm while a tool is still executing. */
   warmDuringTools: ToolWarmPreset[];
   /** Default true: allow every tool name/command; lifecycle and spend gates still apply. */
@@ -159,7 +170,7 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   intervalMs: 4 * 60_000,
   maxConcurrentWarmSessions: 3,
   minCachedTokens: 512,
-  maxConsecutiveFailures: 3,
+  maxConsecutiveFailures: 2,
   maxIdleWarmMs: null,
   warmSpendCeilingUsd: null,
   showWidget: true,
@@ -168,6 +179,7 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   maxOutputTokens: 1,
   logToFile: false,
   allowCodexAutoWarm: true,
+  codexWarmMode: "auto",
   warmDuringTools: [],
   warmAllTools: true,
   toolWarmMinRuntimeMs: 180_000,
@@ -228,6 +240,8 @@ export interface CacheAnchor {
   latestRealTurn: RealTurnObservation;
   /** Latest warm-probe response. Never updated by a real turn. */
   latestProbe: ProbeObservation | null;
+  /** Effective Codex replay mode for this captured anchor, when applicable. */
+  codexReplayMode?: Exclude<CodexWarmMode, "auto">;
 }
 
 export interface WarmResult {

@@ -41,6 +41,7 @@ export function parseConfigJson(text: string): WarmCacheConfig {
     else if (key === "maxIdleWarmMs") valid = value === null || (Number.isSafeInteger(value) && Number(value) >= 0);
     else if (key === "warmSpendCeilingUsd") valid = value === null || (Number.isFinite(value) && Number(value) >= 0);
     else if (key === "anthropicTtl") valid = value === "auto" || value === "5m" || value === "1h";
+    else if (key === "codexWarmMode") valid = value === "auto" || value === "exact" || value === "suffix";
     else if (key === "warmSuffix") valid = Object.prototype.toString.call(value) === "[object String]";
     else if (key === "warmDuringTools") {
       valid = Array.isArray(value) && value.every((item) =>
@@ -136,6 +137,12 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
       const enabled = value.toLowerCase();
       if (enabled !== "on" && enabled !== "off") throw new Error("advisor must be on or off");
       next.warmAdvisor = enabled === "on";
+      continue;
+    }
+    if (key === "codex" || key === "codexmode" || key === "codexwarm") {
+      const mode = value.toLowerCase();
+      if (mode === "auto" || mode === "exact" || mode === "suffix") next.codexWarmMode = mode;
+      else throw new Error("codex replay mode must be auto, exact, or suffix");
       continue;
     }
 

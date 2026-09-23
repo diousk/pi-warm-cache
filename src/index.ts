@@ -7,7 +7,9 @@
  * 1. Snapshot the exact provider payload on each real turn (`before_provider_request`).
  *    This hook is READ-ONLY. We never rewrite real user turns.
  * 2. After the agent settles, start a provider-specific timer (4m / 50m / 24m / ...).
- * 3. On tick, replay that payload with a minimal legal output cap via `modelRegistry.complete({ onPayload })`.
+ * 3. On tick, replay that payload with provider-legal output controls via
+ *    `modelRegistry.complete({ onPayload })`; Codex exact replay has no hard
+ *    output cap because its endpoint rejects one.
  * 4. Never use `sendUserMessage` for warming (would pollute the session and run tools).
  */
 
@@ -59,6 +61,7 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
   return [
     `interval=${interval}`,
     ...(api === "anthropic-messages" ? [`Anthropic TTL=${config.anthropicTtl}`] : []),
+    ...(api === "openai-codex-responses" ? [`codex replay=${config.codexWarmMode ?? "auto"}`] : []),
     `concurrency=${config.maxConcurrentWarmSessions} (warming requests per Pi process)`,
     `debug log=${config.logToFile ? "on" : "off"}`,
   ].join(" · ");
@@ -232,6 +235,9 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         ["1h", "Follow existing 1-hour Anthropic retention"],
         ["codex-on", "Enable Codex automatic warming"],
         ["codex-off", "Disable Codex automatic warming"],
+        ["codex=auto", "Detect and avoid Codex suffix branch misses"],
+        ["codex=exact", "Replay Codex requests exactly (uncapped output risk)"],
+        ["codex=suffix", "Use the bounded Codex OK-suffix replay"],
         ["log", "Enable local diagnostic logging"],
         ["nolog", "Disable local diagnostic logging"],
         ["widget", "Show the warming widget"],
@@ -249,7 +255,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       return items.length > 0 ? items : null;
     },
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|codex=auto|codex=exact|codex=suffix|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
     handler: async (args, ctx) => {
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {
@@ -368,7 +374,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
 
       const lower = trimmed.toLowerCase();
-      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
+      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|codex(?:mode|warm)?=(?:auto|exact|suffix)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
       const unknown = lower.split(/\s+/).find((token) => !knownTokens.test(token));
       if (unknown) {
         ctx.ui.notify(`Unknown option: ${unknown}. Type /warm followed by a space to see available options.`, "warning");
@@ -411,7 +417,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         persistConfig();
         ctx.ui.notify(
           lower === "codex-on"
-            ? "Codex auto-warm enabled (OK-suffix path). Sticky block still applies if out is huge."
+            ? `Codex auto-warm enabled (replay=${config.codexWarmMode}). Sticky block still applies if out is huge.`
             : "Codex auto-warm disabled. /warm now still works for a one-shot probe.",
           "info",
         );

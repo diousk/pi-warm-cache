@@ -1928,6 +1928,15 @@ function deepEqualExcept<Actual, Expected>(
     }) === "payload-drift",
     "reported xAI cache writes should request an immediate re-anchor",
   );
+  assert(
+    classifyProbeOutcome({
+      cacheFamily: "xai-best-effort",
+      cacheRead: 0,
+      cacheWrite: 0,
+      consecutiveFailuresBefore: 1,
+    }) === "payload-drift",
+    "the default failure budget should re-anchor after two best-effort misses",
+  );
 }
 
 // 5) minimumOutputTokensForPayload helper
@@ -3790,7 +3799,7 @@ function deepEqualExcept<Actual, Expected>(
   renderWarmHitUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, anchor, plan, 128_000);
   renderReanchorUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, "compacted · waiting for next turn");
   renderProbeRetryUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, "read=0 write=0");
-  renderFailureUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, "probe miss · retry 1/3", "read=0 write=0");
+  renderFailureUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, "probe miss · retry 1/2", "read=0 write=0");
   renderIdleUi(ctx, { ...DEFAULT_CONFIG, showWidget: true }, "waiting for first turn");
 
   const widgets = calls.filter((call) => call.kind === "widget");
@@ -4174,7 +4183,7 @@ function deepEqualExcept<Actual, Expected>(
     "the cutoff abort must clear timers (no re-arm loop)",
   );
   assert(
-    longWarmer.getStatusText().includes("probeFailStreak=0/3"),
+    longWarmer.getStatusText().includes("probeFailStreak=0/2"),
     "the cutoff abort must never count as a probe failure",
   );
   // /warm now bypasses the idle cutoff entirely.
@@ -4215,7 +4224,7 @@ function deepEqualExcept<Actual, Expected>(
     "a short family must stop at the 30m idle cutoff",
   );
   assert(
-    shortWarmer.getStatusText().includes("probeFailStreak=0/3"),
+    shortWarmer.getStatusText().includes("probeFailStreak=0/2"),
     "the short-family cutoff abort must not count as a probe failure",
   );
 
@@ -4639,7 +4648,7 @@ function deepEqualExcept<Actual, Expected>(
     "the stale probe must be an ordinary miss, not a failure",
   );
   assert(
-    warmer.getStatusText().includes("probeFailStreak=1/3"),
+    warmer.getStatusText().includes("probeFailStreak=1/2"),
     "the stale miss must count against the failure budget",
   );
   warmer.invalidateAnchor(ctx, "compacted · waiting for next turn");
@@ -4656,7 +4665,7 @@ function deepEqualExcept<Actual, Expected>(
     "the fresh capture must finish the re-anchor",
   );
   assert(
-    warmer.getStatusText().includes("probeFailStreak=0/3"),
+    warmer.getStatusText().includes("probeFailStreak=0/2"),
     "a re-anchor must reset the failure budget so stale misses do not carry",
   );
   const postReanchorHit = await warmer.warmNow(ctx);
@@ -4665,7 +4674,7 @@ function deepEqualExcept<Actual, Expected>(
     "the post-re-anchor session must probe cleanly with a reset budget",
   );
   assert(
-    warmer.getStatusText().includes("probeFailStreak=0/3"),
+    warmer.getStatusText().includes("probeFailStreak=0/2"),
     "the post-re-anchor hit must keep the failure budget reset",
   );
   warmer.dispose();
@@ -5499,9 +5508,13 @@ for (const tool of [
     "toggle must preserve JSON tool-name policy",
   );
   assert(on.intervalMs === 240_000, "omitted JSON values must inherit the four-minute default");
+  assert(DEFAULT_CONFIG.codexWarmMode === "auto", "Codex replay must default to adaptive mode");
+  assert(parseConfigJson('{"codexWarmMode":"exact"}').codexWarmMode === "exact", "JSON must accept exact Codex replay mode");
+  assert(parseConfigArgs("codex=suffix").codexWarmMode === "suffix", "CLI must accept suffix Codex replay mode");
+  assert(parseConfigArgs("codexmode=exact").codexWarmMode === "exact", "CLI alias must accept exact Codex replay mode");
   assert(parseConfigJson('{"intervalMs":null}').intervalMs === null, "explicit null must preserve provider automatic cadence");
   assert(parseConfigJson('{"intervalMs":120000}').intervalMs === 120_000, "saved custom intervals must remain respected");
-  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"typo":true}', '{"__proto__":{}}']) {
+  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"codexWarmMode":"invalid"}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"typo":true}', '{"__proto__":{}}']) {
     let rejected = false;
     try { parseConfigJson(bad); } catch { rejected = true; }
     assert(rejected, `invalid JSON must be rejected atomically: ${bad}`);
@@ -5593,6 +5606,7 @@ for (const tool of [
 // All-tools is the default and only bypasses the name/command allowlist.
 {
   assert(DEFAULT_CONFIG.warmAllTools, "all-tools must default on");
+  assert(DEFAULT_CONFIG.maxConsecutiveFailures === 2, "warming must stop after two consecutive failures by default");
   assert(parseConfigJson('{}').warmAllTools, "omitted JSON policy must inherit all-tools");
   assert(!parseConfigJson('{"warmAllTools":false}').warmAllTools, "explicit saved opt-out must remain respected");
   const config = parseConfigJson('{"enabled":false,"warmAllTools":true}');
@@ -5653,7 +5667,11 @@ for (const tool of [
     ui: {notify: (s: string) => notices.push(s), setStatus() {}, setWidget() {}, theme: {fg: (_: string, s: string) => s}},
   });
   await handler("off tools=all toolmax=4", ctx);
-  assert(savedConfigs.length === 1 && JSON.parse(savedConfigs[0]!).warmAllTools === true, "settings commands must persist their effective configuration");
+  const initialSavedCount: number = savedConfigs.length;
+  assert(initialSavedCount === 1 && JSON.parse(savedConfigs[0]!).warmAllTools === true, "settings commands must persist their effective configuration");
+  await handler("codex=exact", ctx);
+  const afterCodexCount: number = savedConfigs.length;
+  assert(afterCodexCount === 2 && JSON.parse(savedConfigs[1]!).codexWarmMode === "exact", "Codex replay mode must be accepted and persisted by the command handler");
   notices.length = 0;
   await handler("config", ctx);
   const currentConfig = notices.at(-1)!;
@@ -5671,9 +5689,9 @@ for (const tool of [
   await handler(" STATUS ", ctx);
   assert(notices.at(-1) === stat, "inspection must not change counters or lifecycle");
   assert(notices.length === 6, "each read command must emit exactly one response");
-  assert(savedConfigs.length === 1, "read-only commands must not save settings");
+  assert(savedConfigs.length === 2, "read-only commands must not save settings");
   await handler("unknown-option", ctx);
-  assert(savedConfigs.length === 1, "unknown options must not overwrite saved settings");
+  assert(savedConfigs.length === 2, "unknown options must not overwrite saved settings");
 }
 
 {
@@ -5787,9 +5805,121 @@ for (const tool of [
   }
 }
 
+// Codex adaptive replay: a suffix hit followed by a comparable real-turn miss
+// switches the next probe to exact replay for the active cache route.
+{
+  const codexModel = modelFixture({
+    id: "gpt-6-astra",
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    cost: { input: 2, cacheRead: 0.2, cacheWrite: 2, output: 4 },
+  });
+  const firstPayload = {
+    model: codexModel.id,
+    store: false,
+    stream: true,
+    instructions: "Reply briefly.",
+    input: [{ role: "user", content: [{ type: "input_text", text: "keep this exact prefix" }] }],
+    prompt_cache_key: "adaptive-codex-session",
+    tool_choice: "auto",
+  };
+  const replayed: Array<ReturnType<typeof payloadObject>> = [];
+  const completeStub = completeFixture(async (
+    _model: Model<any>,
+    _context: WarmCompleteContext,
+    options?: ProbeRequestOptions,
+  ) => {
+    const body = payloadObject(options?.onPayload?.(structuredClone(firstPayload), codexModel));
+    replayed.push(body);
+    return {
+      stopReason: "stop" as const,
+      usage: { input: 1, output: 5, cacheRead: 100, cacheWrite: 0, cost: { total: 0.01 } },
+    };
+  });
+  const ctx = contextFixture({
+    cwd: process.cwd(),
+    model: codexModel,
+    hasUI: false,
+    isIdle: () => true,
+    thinkingLevel: "off",
+    sessionManager: { getSessionId: () => "adaptive-codex-session" },
+    modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: {}, env: {} }),
+    },
+  });
+  const warmer = new SessionWarmer(
+    extensionApiFixture({ getThinkingLevel: () => "off" }),
+    completeStub,
+  );
+  warmer.bindContext(ctx);
+  warmer.setConfig({ ...DEFAULT_CONFIG, codexWarmMode: "auto", minCachedTokens: 10, intervalMs: 60_000 });
+  warmer.capturePayload(firstPayload, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+
+  const suffixProbe = await warmer.warmNow(ctx);
+  assert(suffixProbe.cacheHit, "adaptive Codex suffix probe should hit in the fixture");
+  assert(Array.isArray(replayed[0]?.input) && replayed[0].input.length === 2, "adaptive mode should begin with one bounded suffix turn");
+  assert(warmer.getStatusText().includes("codexReplay=suffix policy=auto"), "status should expose the initial suffix mode");
+
+  const nextPayload = {
+    ...firstPayload,
+    input: [
+      ...firstPayload.input,
+      { role: "assistant", content: [{ type: "output_text", text: "prior answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "continue" }] },
+    ],
+  };
+  assert(firstPayload.input.length === 1, "fixture payload must remain unmodified after suffix probe");
+  warmer.onProviderRequestStart(nextPayload, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 0, cacheWrite: 0, output: 2 });
+  assert(
+    warmer.getLatestRealTurnObservation()?.reason.includes("next probe uses exact replay"),
+    "a comparable miss after a suffix hit should explain the adaptive switch",
+  );
+  assert(warmer.getStatusText().includes("codexReplay=exact policy=auto"), "status should expose the learned exact mode");
+
+  const exactProbe = await warmer.warmNow(ctx);
+  assert(exactProbe.cacheHit, "adaptive exact probe should hit in the fixture");
+  assert(
+    JSON.stringify(replayed[1]?.input) === JSON.stringify(nextPayload.input),
+    `adaptive exact mode must stop appending the suffix: ${JSON.stringify(replayed[1]?.input)}`,
+  );
+  warmer.dispose();
+
+  const forcedReplayed: Array<ReturnType<typeof payloadObject>> = [];
+  const forcedStub = completeFixture(async (
+    _model: Model<any>,
+    _context: WarmCompleteContext,
+    options?: ProbeRequestOptions,
+  ) => {
+    forcedReplayed.push(payloadObject(options?.onPayload?.(structuredClone(firstPayload), codexModel)));
+    return {
+      stopReason: "stop" as const,
+      usage: { input: 1, output: 5, cacheRead: 100, cacheWrite: 0, cost: { total: 0.01 } },
+    };
+  });
+  const forced = new SessionWarmer(
+    extensionApiFixture({ getThinkingLevel: () => "off" }),
+    forcedStub,
+  );
+  forced.bindContext(ctx);
+  forced.setConfig({ ...DEFAULT_CONFIG, codexWarmMode: "exact", minCachedTokens: 10, intervalMs: 60_000 });
+  forced.capturePayload(firstPayload, ctx);
+  forced.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  const forcedProbe = await forced.warmNow(ctx);
+  assert(forcedProbe.cacheHit, "forced exact Codex probe should hit in the fixture");
+  assert(
+    Array.isArray(forcedReplayed[0]?.input) && forcedReplayed[0].input.length === 1,
+    "codex=exact must replay the captured endpoint without a suffix from the first probe",
+  );
+  assert(forced.getStatusText().includes("codexReplay=exact policy=exact"), "forced exact mode should be visible in status");
+  forced.dispose();
+}
+
 {
   const summary = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 240_000 }, "openai-codex-responses");
-  assert(summary === "interval=4m · concurrency=3 (warming requests per Pi process) · debug log=off", "Codex settings must use readable units and explain concurrency without Anthropic TTL");
+  assert(summary === "interval=4m · codex replay=auto · concurrency=3 (warming requests per Pi process) · debug log=off", "Codex settings must use readable units and explain the replay policy");
   assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 90_000 }).includes("interval=1m 30s"), "settings must avoid decimal minutes");
   assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 15_000 }).includes("interval=15s"), "settings must support seconds");
   const anthropic = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: null, logToFile: true }, "anthropic-messages");

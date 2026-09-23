@@ -41,7 +41,10 @@ prompts and effective nonempty tool inventories still fail closed.
 
 ## How it works
 
-The extension copies the last real provider request and replays it with a tiny output limit.
+The extension copies the last real provider request and replays it with
+provider-legal output controls. Most routes use a tiny output limit; the Codex
+endpoint rejects output-limit fields, so exact Codex replay is deliberately
+uncapped and protected by an oversized-output guard.
 It does not rebuild the conversation.
 It does not change your real turns.
 It does not run tools.
@@ -77,6 +80,9 @@ can be edited before submitting.
 /warm resume           # clear a sticky automatic-warm block
 /warm codex-on         # enable Codex timer warming
 /warm codex-off        # disable Codex timer warming
+/warm codex=auto       # adapt after a suffix branch miss (default)
+/warm codex=exact      # replay Codex exactly (output is not hard-capped)
+/warm codex=suffix     # keep the bounded OK-suffix replay
 /warm 5m               # Anthropic short cadence
 /warm 1h               # Anthropic long cadence when the request already uses it
 /warm auto             # follow the provider strategy
@@ -103,7 +109,7 @@ Automatic keepalive is on for these registered routes:
 | Anthropic | Probe about every 4 minutes, or about every 48 minutes when the request already uses a 1-hour cache |
 | OpenAI | Probe on the explicit or implicit cache window for that model |
 | Azure OpenAI | Same OpenAI response strategy |
-| OpenAI Codex | Codex timer policy; turn it off with `/warm codex-off` if output spikes |
+| OpenAI Codex | Adaptive replay by default; switches from the bounded suffix to exact replay when a suffix hit is followed by a comparable real-turn miss |
 | GitHub Copilot | Automatic warming for keyed Responses, Completions, and Anthropic models whose captured request contains cache markers |
 | xAI Grok 4.5 | Best-effort probe about every 4 minutes when the request has a stable cache key |
 | OpenCode Go (default setup) | Keepalive on short Anthropic and keyed Responses routes; no timer on Completions because that cache already lasts a long time |
@@ -204,6 +210,15 @@ instead of appending the main-agent `OK` suffix. The stock rpiv-advisor prompt
 already constrains its answer, and exact replay refreshes the endpoint future
 rpiv-advisor calls extend.
 
+Main-agent Codex warming uses `codexWarmMode: "auto"` by default. It starts with
+the bounded `OK` suffix because the Codex route has no hard output-token cap. If
+the provider reports a hit for that suffix but the next comparable real turn has
+no cache read, the extension records the branch as unsafe and uses exact replay
+for subsequent probes. Set `/warm codex=exact` to force exact replay from the
+first probe, or `/warm codex=suffix` to retain the legacy behavior. Exact replay
+can produce a larger completion and may consume more tokens; the existing
+oversized-output guard can block automatic warming after repeated spikes.
+
 The rpiv-advisor idle cutoff is measured from its own captured request, not
 executor activity. Its timer is independent of the main agent's tool-batch probe
 count. New rpiv-advisor executions, session changes, compaction, and shutdown
@@ -229,10 +244,12 @@ Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
 {
   "enabled": false,
   "warmAdvisor": false,
+  "codexWarmMode": "auto",
   "warmDuringTools": ["gradle"],
   "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
   "toolWarmMaxProbes": 6,
+  "maxConsecutiveFailures": 2,
   "intervalMs": 240000,
   "maxIdleWarmMs": 1800000
 }
@@ -253,6 +270,10 @@ Settings commands create the file if needed and replace it atomically. A save
 failure reports a warning and keeps the change active for the current session.
 Status/config/savings queries, `/warm now`, and `/warm resume` do not write the file.
 
+Automatic warming stops after two consecutive probe failures by default. A new
+real turn resets the failure streak; set `maxConsecutiveFailures` in the JSON
+configuration to change this retry budget.
+
 JSON keys use the `WarmCacheConfig` field names in `src/types.ts`, not the
 command aliases below. Durations are numbers in milliseconds; unknown fields,
 invalid types and unsupported tool presets are rejected.
@@ -264,6 +285,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `on` / `off` | Master switch | on |
 | `5m` / `1h` / `auto` | Anthropic cadence | auto |
 | `interval=` | Override probe delay | 4 minutes |
+| `codex=auto\|exact\|suffix` | Codex replay policy: adapt, exact endpoint replay, or legacy bounded suffix | `auto` |
 | `max=` | Max concurrent warm sessions | 3 |
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
