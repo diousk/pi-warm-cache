@@ -13,8 +13,9 @@
  * 4. Never use `sendUserMessage` for warming (would pollute the session and run tools).
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadConfigJson, parseConfigArgs, saveConfigJson, warmCacheConfigPath } from "./config.ts";
+import type { Model } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadConfigJson, normalizeWarmModelId, parseConfigArgs, saveConfigJson, warmCacheConfigPath } from "./config.ts";
 import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
@@ -69,6 +70,31 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
   ].join(" · ");
 }
 
+function describeWarmModel(model: Model<any>): string {
+  const prices = [
+    Number.isFinite(model.cost?.input) && model.cost.input > 0
+      ? `input $${model.cost.input.toLocaleString("en-US", { maximumFractionDigits: 4 })}/MTok`
+      : null,
+    Number.isFinite(model.cost?.cacheRead) && model.cost.cacheRead > 0
+      ? `cache read $${model.cost.cacheRead.toLocaleString("en-US", { maximumFractionDigits: 4 })}/MTok`
+      : null,
+  ].filter((value): value is string => value !== null);
+  const modelName = model.name && model.name !== model.id ? `${model.name} · ` : "";
+  return `${modelName}${prices.length > 0 ? prices.join(" · ") : "price not listed"}`;
+}
+
+function selectableWarmModels(ctx: ExtensionContext): Model<any>[] {
+  try {
+    const scoped = ctx.scopedModels?.map(({ model }) => model) ?? [];
+    const models = scoped.length > 0 ? scoped : ctx.modelRegistry.getAvailable();
+    return [...models].sort((left, right) =>
+      `${left.provider}/${left.id}`.localeCompare(`${right.provider}/${right.id}`),
+    );
+  } catch {
+    return [];
+  }
+}
+
 export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
   const bridge = new ClaudeBridgeTransport(pi);
   const warmer = new SessionWarmer(pi, undefined, { transport: bridge });
@@ -78,6 +104,10 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
   pi.on("turn_start", () => nativeWarming.onRealTurn());
   let config = { ...DEFAULT_CONFIG };
+  let availableWarmModels: Model<any>[] = [];
+  const refreshAvailableWarmModels = (ctx: ExtensionContext) => {
+    availableWarmModels = selectableWarmModels(ctx);
+  };
   let lastCapabilityNoticeKey: string | null = null;
 
   // Optional CLI: pi --warm-cache / pi --warm-cache=off
@@ -88,6 +118,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("session_start", async (event, ctx) => {
+    refreshAvailableWarmModels(ctx);
     nativeWarming.onRealTurn();
     advisorWarmer.dispose();
     bridge.dispose();
@@ -153,6 +184,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   });
 
   pi.on("model_select", async (_event, ctx) => {
+    refreshAvailableWarmModels(ctx);
     bridge.invalidate();
     bridge.configure(ctx, config);
     warmer.bindContext(ctx);
@@ -234,6 +266,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         ["tools=ask_user_question", "Warm during the named ask_user_question tool"],
         ["tools=all", "Warm during any long tool execution"],
         ["tools=off", "Warm only between agent turns"],
+        ["model=all", "Warm every selectable model (default)"],
         ["toolmin=3m", "Wait 3 minutes before warming during tools"],
         ["toolmax=6", "Allow up to 6 refreshes per tool batch"],
         ["interval=4m", "Set refresh interval (editable duration)"],
@@ -264,11 +297,44 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       const items = options
         .filter(([value]) => value!.startsWith(query) && (!preceding || !standalone.has(value!)))
         .map(([value, description]) => ({ value: preceding + value, label: value!, description }));
+      if (query.startsWith("model=")) {
+        const modelQuery = query.slice("model=".length);
+        const enteredModels = prefix.trim().split(/\s+/).slice(0, -1);
+        let selectingAll = config.warmModels.length === 0;
+        const selectedModels = new Set(config.warmModels.map(normalizeWarmModelId));
+        for (const token of enteredModels) {
+          const match = /^models?=(.+)$/i.exec(token);
+          if (!match) continue;
+          const requested = match[1]!.toLowerCase().split(",").map((item) => item.trim()).filter(Boolean);
+          if (requested.length === 1 && requested[0] === "all") {
+            selectingAll = true;
+            selectedModels.clear();
+            continue;
+          }
+          if (selectingAll) {
+            selectingAll = false;
+            selectedModels.clear();
+          }
+          for (const model of requested) selectedModels.add(normalizeWarmModelId(model));
+        }
+        const excluded = selectingAll ? new Set<string>() : selectedModels;
+        for (const model of availableWarmModels) {
+          const id = normalizeWarmModelId(model);
+          if (excluded.has(id)) continue;
+          if (modelQuery && !id.includes(modelQuery) && !model.name.toLowerCase().includes(modelQuery)) continue;
+          items.push({
+            value: `${preceding}model=${model.provider}/${model.id}`,
+            label: `${model.provider}/${model.id}`,
+            description: `Add model · ${describeWarmModel(model)}`,
+          });
+        }
+      }
       return items.length > 0 ? items : null;
     },
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|codex=auto|codex=exact|codex=suffix|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
+      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|codex=auto|codex=exact|codex=suffix|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|model=all|model=<provider>/<model-id>|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
     handler: async (args, ctx) => {
+      refreshAvailableWarmModels(ctx);
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {
         ctx.ui.notify(
@@ -386,7 +452,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
 
       const lower = trimmed.toLowerCase();
-      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|codex(?:mode|warm)?=(?:auto|exact|suffix)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|toolmin|toolmax|ttl|log|debug)=.+)$/;
+      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|codex(?:mode|warm)?=(?:auto|exact|suffix)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|model|models|toolmin|toolmax|ttl|log|debug)=.+)$/;
       const unknown = lower.split(/\s+/).find((token) => !knownTokens.test(token));
       if (unknown) {
         ctx.ui.notify(`Unknown option: ${unknown}. Type /warm followed by a space to see available options.`, "warning");

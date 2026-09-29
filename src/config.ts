@@ -28,12 +28,17 @@ export function parseConfigJson(text: string): WarmCacheConfig {
   if (!parsed || Object.prototype.toString.call(parsed) !== "[object Object]") {
     throw new Error("configuration must be a JSON object");
   }
-  const next = { ...DEFAULT_CONFIG, warmDuringTools: [...DEFAULT_CONFIG.warmDuringTools] };
+  const next = {
+    ...DEFAULT_CONFIG,
+    warmDuringTools: [...DEFAULT_CONFIG.warmDuringTools],
+    warmModels: [...DEFAULT_CONFIG.warmModels],
+  };
   const booleans = new Set(["enabled", "showWidget", "logToFile", "allowCodexAutoWarm", "warmAllTools", "warmAdvisor"]);
   const positive = new Set(["maxConcurrentWarmSessions", "maxConsecutiveFailures", "maxOutputTokens", "toolWarmMaxProbes"]);
   const nonnegative = new Set(["minCachedTokens", "toolWarmMinRuntimeMs"]);
   for (const [key, value] of Object.entries(parsed)) {
     let valid = false;
+    let assignedValue: unknown = value;
     if (booleans.has(key)) valid = value === true || value === false;
     else if (positive.has(key)) valid = Number.isSafeInteger(value) && Number(value) >= 1;
     else if (nonnegative.has(key)) valid = Number.isSafeInteger(value) && Number(value) >= 0;
@@ -47,8 +52,17 @@ export function parseConfigJson(text: string): WarmCacheConfig {
       valid = Array.isArray(value) && value.every((item) =>
         Object.prototype.toString.call(item) === "[object String]" && isToolWarmName(item));
     }
+    else if (key === "warmModels") {
+      valid = Array.isArray(value) && value.every((item) =>
+        Object.prototype.toString.call(item) === "[object String]" && isWarmModelName(String(item)));
+      if (valid) {
+        // SAFETY: `valid` is true only after every array item passed the string and provider/model-id checks.
+        const models = value as string[];
+        assignedValue = models.map(normalizeWarmModelId);
+      }
+    }
     if (!valid) throw new Error(`invalid or unknown configuration field: ${key}`);
-    Object.assign(next, { [key]: value });
+    Object.assign(next, { [key]: assignedValue });
   }
   return next;
 }
@@ -63,10 +77,10 @@ export function loadConfigJson(path = warmCacheConfigPath()): LoadedConfig {
     return { config: parseConfigJson(readFileSync(path, "utf8")) };
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-      return { config: { ...DEFAULT_CONFIG, warmDuringTools: [] } };
+      return { config: { ...DEFAULT_CONFIG, warmDuringTools: [], warmModels: [] } };
     }
     return {
-      config: { ...DEFAULT_CONFIG, enabled: false, warmDuringTools: [] },
+      config: { ...DEFAULT_CONFIG, enabled: false, warmDuringTools: [], warmModels: [] },
       error: `${path}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
@@ -77,8 +91,35 @@ function isToolWarmName(value: string): boolean {
   return value.length > 0 && !/\s|,/.test(value);
 }
 
+function isWarmModelName(value: string): boolean {
+  const slash = value.indexOf("/");
+  return slash > 0 && slash < value.length - 1 && !/\s|,/.test(value);
+}
+
+export function normalizeWarmModelId(model: string | { provider: string; id: string }): string {
+  if (Object.prototype.toString.call(model) === "[object String]") return String(model).toLowerCase();
+  // SAFETY: The public input is a string or the provider/id model reference object; the string branch returned above.
+  const modelRef = model as { provider: string; id: string };
+  const value = `${modelRef.provider}/${modelRef.id}`;
+  return value.toLowerCase();
+}
+
+export function isWarmModelAllowed(
+  warmModels: readonly string[] | undefined,
+  model: { provider: string; id: string } | null | undefined,
+): boolean {
+  if (!warmModels || warmModels.length === 0) return true;
+  if (!model) return false;
+  const modelId = normalizeWarmModelId(model);
+  return warmModels.some((selected) => normalizeWarmModelId(selected) === modelId);
+}
+
 export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CONFIG): WarmCacheConfig {
-  const next = { ...base };
+  const next = {
+    ...base,
+    warmDuringTools: [...base.warmDuringTools],
+    warmModels: [...(base.warmModels ?? [])],
+  };
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return next;
 
@@ -137,6 +178,24 @@ export function parseConfigArgs(args: string, base: WarmCacheConfig = DEFAULT_CO
       const enabled = value.toLowerCase();
       if (enabled !== "on" && enabled !== "off") throw new Error("advisor must be on or off");
       next.warmAdvisor = enabled === "on";
+      continue;
+    }
+    if (key === "model" || key === "models") {
+      const requested = value.toLowerCase().split(",").map((item) => item.trim()).filter(Boolean);
+      if (requested.length === 1 && requested[0] === "all") {
+        next.warmModels = [];
+      } else {
+        if (requested.includes("all")) throw new Error("model=all cannot be combined with model ids");
+        if (requested.some((item) => !isWarmModelName(item))) {
+          throw new Error("model must be all or a provider/model id from the selectable models");
+        }
+        for (const model of requested) {
+          const normalized = normalizeWarmModelId(model);
+          if (!next.warmModels.some((selected) => normalizeWarmModelId(selected) === normalized)) {
+            next.warmModels.push(normalized);
+          }
+        }
+      }
       continue;
     }
     if (key === "codex" || key === "codexmode" || key === "codexwarm") {

@@ -161,6 +161,8 @@ export interface WarmCacheConfig {
   toolWarmMinRuntimeMs: number;
   /** Maximum provider probes during one uninterrupted matching-tool batch. */
   toolWarmMaxProbes: number;
+  /** Exact provider/model ids allowed to warm; empty means all selectable models. */
+  warmModels: string[];
 }
 
 export const DEFAULT_CONFIG: WarmCacheConfig = {
@@ -184,6 +186,7 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   warmAllTools: true,
   toolWarmMinRuntimeMs: 180_000,
   toolWarmMaxProbes: 6,
+  warmModels: [],
 };
 
 /** Snapshot of the prefix we must hit on the next warm request. */

@@ -308,6 +308,7 @@ Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
   "enabled": false,
   "warmAdvisor": false,
   "codexWarmMode": "auto",
+  "warmModels": [],
   "warmDuringTools": ["gradle"],
   "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
@@ -352,6 +353,7 @@ Useful tokens for `/warm` and `--warm-cache`:
 | `max=` | Max concurrent warm sessions | 3 |
 | `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
 | `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
+| `model=` | Restrict warming to one or more selectable `provider/model-id` values; `model=all` resets | all models |
 | `log` / `nolog` | Local JSONL log | off |
 | `tools=` | Tool policy: `all`, an exact tool name, `gradle`, or `off` | all |
 | `tools=all` | Allow all tool names and commands (`warmAllTools: true` in JSON) | on |
@@ -368,6 +370,19 @@ Use `/warm tools=all`; `/warm tools=gradle`; or
 `/warm tools=ask_user_question` to select the matching policy. `/warm tools=off`
 disables tool warming but leaves idle warming enabled if the master switch is on.
 All-tools mode does not itself enable the master switch.
+
+Model warming includes all models by default (`"warmModels": []`). Type
+`/warm model=` to browse models selectable in the current Pi session; choices
+show provider/model id, model name and catalog input/cache-read prices when
+available. Selecting a model narrows warming to that model; repeat `model=`
+with another choice to add it. Use `/warm model=all` to clear the allowlist and
+return to all models. This filter applies to the active Pi model and independent
+`rpiv-advisor` probes, and is saved in `~/.pi/agent/warm-cache.json`. On Pi
+versions with native warming, the extension also prevents native warming from
+bypassing an explicit model exclusion while the extension is enabled. This is
+an allowlist, not a fan-out: only the active request model with a valid real-
+turn cache anchor can be warmed; other listed models become eligible when
+selected in Pi.
 
 The minimum runtime, probe count, idle cutoff, spend/route gates and payload
 revision fencing still apply. Tools must actually be executing; model

@@ -23,7 +23,7 @@ import {
   resolveStrategy,
   stableFingerprint,
 } from "./provider.ts";
-import { formatDurationShort } from "./config.ts";
+import { formatDurationShort, isWarmModelAllowed } from "./config.ts";
 import { appendWarmLog, warmLogPath, type WarmLogEvent } from "./log.ts";
 import {
   buildWarmResult,
@@ -328,6 +328,9 @@ export class SessionWarmer {
   /** Keep route ownership even when spend, failure, or tool policy pauses probes. */
   ownsAutomaticWarming(ctx: ExtensionContext): boolean {
     if (!this.config.enabled) return false;
+    // Keep the extension as the native-warming owner for explicitly excluded
+    // models too; otherwise Pi's native policy could bypass the user's filter.
+    if (!isWarmModelAllowed(this.config.warmModels, ctx.model)) return true;
     const sameModel = this.anchor?.provider === ctx.model?.provider && this.anchor?.modelId === ctx.model?.id;
     const capability = sameModel ? this.currentCapability(ctx) : this.resolveCapability(ctx.model);
     return capability.state === "verified";
@@ -428,7 +431,11 @@ export class SessionWarmer {
   }
 
   setConfig(config: WarmCacheConfig): void {
-    this.config = { ...config };
+    this.config = {
+      ...config,
+      warmDuringTools: [...config.warmDuringTools],
+      warmModels: [...(config.warmModels ?? [])],
+    };
     if (this.anchor && this.ctx?.model?.api === "openai-codex-responses") {
       this.anchor.codexReplayMode = this.resolveCodexReplayMode(this.ctx.model, this.anchor, true);
     }
@@ -1183,6 +1190,9 @@ export class SessionWarmer {
     const toolWarm = this.config.warmAllTools || this.config.warmDuringTools.length > 0
       ? `toolWarm=${this.config.warmAllTools ? "all" : this.config.warmDuringTools.join(",")} min=${formatDurationShort(this.config.toolWarmMinRuntimeMs)} probes=${this.toolWarmProbeCount}/${this.config.toolWarmMaxProbes}`
       : "toolWarm=off";
+    const modelWarm = this.config.warmModels.length === 0
+      ? "modelWarm=all"
+      : `modelWarm=${this.config.warmModels.join(",")}`;
     const codexReplay = api === "openai-codex-responses"
       ? `codexReplay=${anchor?.codexReplayMode ?? this.resolveCodexReplayMode(model, anchor) ?? "suffix"} policy=${this.config.codexWarmMode ?? "auto"}`
       : "";
@@ -1207,6 +1217,7 @@ export class SessionWarmer {
       `probeHits=${probeHits}`,
       `probeMisses=${probeMisses}`,
       toolWarm,
+      modelWarm,
       retry,
       `savingsSummary=${this.getSavingsSummaryText()}`,
       `cacheKey=${cacheKey}`,
@@ -1320,6 +1331,16 @@ export class SessionWarmer {
     if (this.disposed || !this.config.enabled) return;
     const ctx = this.ctx;
     if (!ctx) return;
+    if (!isWarmModelAllowed(this.config.warmModels, ctx.model)) {
+      this.clearTimers();
+      if (this.warming) this.abort?.abort();
+      this.showIdle(
+        ctx,
+        "model not selected",
+        `warming is limited to ${this.config.warmModels.join(", ")}`,
+      );
+      return;
+    }
     const agentIdle = ctx.isIdle();
     const toolWarmAllowed = this.canWarmDuringTool();
     if (!agentIdle && !toolWarmAllowed) {
@@ -1548,6 +1569,12 @@ export class SessionWarmer {
   private showAgentWorking(ctx: ExtensionContext): void {
     if (!this.config.enabled) {
       this.showIdle(ctx, "disabled");
+    } else if (!isWarmModelAllowed(this.config.warmModels, ctx.model)) {
+      this.showIdle(
+        ctx,
+        "model not selected",
+        `warming is limited to ${this.config.warmModels.join(", ")}`,
+      );
     } else if (this.autoWarmBlockReason) {
       this.showIdle(ctx, "auto-warm blocked", this.autoWarmBlockReason);
     } else {
@@ -1835,6 +1862,30 @@ export class SessionWarmer {
     const payload = this.lastPayload;
     const plan = this.plan;
     const capability = this.currentCapability(ctx);
+
+    if (!isWarmModelAllowed(this.config.warmModels, ctx?.model)) {
+      const detail = `warming is limited to ${this.config.warmModels.join(", ")}`;
+      this.clearTimers();
+      this.recordAttempt(reason, false, `model not selected · ${detail}`);
+      if (ctx) this.showIdle(ctx, "model not selected", detail);
+      return {
+        ok: false,
+        cacheHit: false,
+        probeOutcome: "unavailable",
+        cacheRead: 0,
+        cacheWrite: 0,
+        input: 0,
+        output: 0,
+        costUsd: 0,
+        estimatedSavedUsd: 0,
+        error: `model not selected · ${detail}`,
+        unavailable: true,
+        provider: ctx?.model?.provider,
+        modelId: ctx?.model?.id,
+        api: ctx?.model?.api,
+        fingerprint: anchor?.payloadFingerprint ?? "",
+      };
+    }
 
     if (capability.state === "unsupported") {
       this.clearTimers();

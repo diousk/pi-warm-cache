@@ -59,7 +59,7 @@ import {
   formatSavingsSummary,
   resolveModelPricing,
 } from "./savings.ts";
-import { loadConfigJson, parseConfigJson, parseConfigArgs, saveConfigJson } from "./config.ts";
+import { isWarmModelAllowed, loadConfigJson, parseConfigJson, parseConfigArgs, saveConfigJson } from "./config.ts";
 import piWarmCache from "./index.ts";
 import { matchToolWarmPreset, resetProbeSpendLedgerForTest, SessionWarmer } from "./warmer.ts";
 import {
@@ -79,6 +79,7 @@ import {
   type CacheAnchor,
   type ProviderCapability,
   type StrategyPlan,
+  type WarmCacheConfig,
   type WarmResult,
 } from "./types.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -5508,13 +5509,34 @@ for (const tool of [
     "toggle must preserve JSON tool-name policy",
   );
   assert(on.intervalMs === 240_000, "omitted JSON values must inherit the four-minute default");
+  assert(on.warmModels.length === 0 && parseConfigJson("{}").warmModels.length === 0,
+    "an empty model allowlist must preserve the default of all selectable models");
+  const selectedModels = parseConfigArgs("model=anthropic/claude-sonnet-4-5 model=openai/gpt-5.6");
+  assert(
+    selectedModels.warmModels.join(",") === "anthropic/claude-sonnet-4-5,openai/gpt-5.6",
+    "repeated model= arguments should add models to the allowlist",
+  );
+  assert(
+    parseConfigArgs("model=xai/grok-4", selectedModels).warmModels.length === 3,
+    "model= should add to an existing saved selection",
+  );
+  assert(parseConfigArgs("model=all", selectedModels).warmModels.length === 0,
+    "model=all should restore the default all-model policy");
+  assert(isWarmModelAllowed(selectedModels.warmModels, { provider: "OPENAI", id: "GPT-5.6" }),
+    "model allowlist matching should be case-insensitive");
+  assert(!isWarmModelAllowed(selectedModels.warmModels, { provider: "xai", id: "grok-4" }),
+    "a model outside the allowlist must not be warmed");
+  assert(isWarmModelAllowed([], { provider: "xai", id: "grok-4" }),
+    "an empty model list must allow all models");
+  assert(parseConfigJson('{"warmModels":["OpenAI/GPT-5.6"]}').warmModels[0] === "openai/gpt-5.6",
+    "JSON model selections should normalize provider/model ids");
   assert(DEFAULT_CONFIG.codexWarmMode === "auto", "Codex replay must default to adaptive mode");
   assert(parseConfigJson('{"codexWarmMode":"exact"}').codexWarmMode === "exact", "JSON must accept exact Codex replay mode");
   assert(parseConfigArgs("codex=suffix").codexWarmMode === "suffix", "CLI must accept suffix Codex replay mode");
   assert(parseConfigArgs("codexmode=exact").codexWarmMode === "exact", "CLI alias must accept exact Codex replay mode");
   assert(parseConfigJson('{"intervalMs":null}').intervalMs === null, "explicit null must preserve provider automatic cadence");
   assert(parseConfigJson('{"intervalMs":120000}').intervalMs === 120_000, "saved custom intervals must remain respected");
-  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"codexWarmMode":"invalid"}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"typo":true}', '{"__proto__":{}}']) {
+  for (const bad of ['[]', 'null', '{', '{"enabled":"false"}', '{"toolWarmMaxProbes":0}', '{"toolWarmMaxProbes":1.5}', '{"intervalMs":-1}', '{"codexWarmMode":"invalid"}', '{"warmDuringTools":[""]}', '{"warmDuringTools":["tool name"]}', '{"warmModels":["gpt-5.6"]}', '{"warmModels":["openai/"]}', '{"typo":true}', '{"__proto__":{}}']) {
     let rejected = false;
     try { parseConfigJson(bad); } catch { rejected = true; }
     assert(rejected, `invalid JSON must be rejected atomically: ${bad}`);
@@ -5652,6 +5674,58 @@ for (const tool of [
   warmer.dispose();
 }
 
+// The model allowlist keeps both scheduled and manual extension probes off other routes.
+{
+  const model = modelFixture({
+    id: "gpt-5.6",
+    provider: "openai",
+    api: "openai-responses",
+    baseUrl: "https://api.openai.com/v1",
+  });
+  let calls = 0;
+  const ctx = contextFixture({
+    cwd: process.cwd(),
+    model,
+    hasUI: false,
+    isIdle: () => true,
+    thinkingLevel: "off",
+    sessionManager: { getSessionId: () => "model-filter" },
+    ui: { setStatus() {}, setWidget() {}, theme: { fg: (_: string, text: string) => text } },
+  });
+  const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "off" }), completeFixture(async () => {
+    calls++;
+    return { stopReason: "stop", usage: { input: 1, output: 1, cacheRead: 100, cacheWrite: 0 } };
+  }));
+  warmer.bindContext(ctx);
+  warmer.setConfig({
+    ...DEFAULT_CONFIG,
+    minCachedTokens: 10,
+    warmModels: ["anthropic/claude-sonnet-4-5"],
+  });
+  const payload = {
+    model: model.id,
+    input: [{ role: "user", content: [{ type: "input_text", text: "model filter test" }] }],
+    prompt_cache_key: "model-filter",
+  };
+  warmer.capturePayload(payload, ctx);
+  warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  warmer.onAgentSettled(ctx);
+  assert(warmer.getStatusText().includes("modelWarm=anthropic/claude-sonnet-4-5"),
+    "status should display the active model allowlist");
+  assert(warmer.getStatusText().includes("nextDue=none"),
+    "an excluded active model must not receive an automatic warm schedule");
+  assert(warmer.ownsAutomaticWarming(ctx),
+    "excluded supported models must remain owned so Pi native warming cannot bypass the user filter");
+  const manual = await warmer.warmNow(ctx);
+  assert(!manual.ok && manual.unavailable && calls === 0,
+    "manual warm must refuse an excluded model without sending a provider request");
+
+  warmer.setConfig({ ...warmer.getConfig(), warmModels: [] });
+  assert(!warmer.getStatusText().includes("nextDue=none"),
+    "model=all should restore automatic warming for the active model");
+  warmer.dispose();
+}
+
 // Read-only config/status commands work while disabled and preserve overrides.
 {
   const notices: string[] = [];
@@ -5692,6 +5766,87 @@ for (const tool of [
   assert(savedConfigs.length === 2, "read-only commands must not save settings");
   await handler("unknown-option", ctx);
   assert(savedConfigs.length === 2, "unknown options must not overwrite saved settings");
+}
+
+// /warm model= uses the current selectable model scope and adds entries one at a time.
+{
+  type Command = {
+    handler: (args: string, ctx: ExtensionContext) => Promise<void>;
+    getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string; description?: string }> | null;
+  };
+  let command: Command | undefined;
+  let saved: WarmCacheConfig | undefined;
+  const pi = extensionApiFixture({
+    registerFlag() {},
+    on() {},
+    registerCommand: (_name: string, registered: Command) => { command = registered; },
+  });
+  piWarmCache(pi, (config) => { saved = config; });
+  assert(command?.getArgumentCompletions, "warm command must provide argument completions");
+  const gpt = modelFixture({
+    id: "gpt-5.6",
+    name: "GPT-5.6",
+    provider: "openai",
+    api: "openai-responses",
+    baseUrl: "https://api.openai.com/v1",
+    cost: { input: 1, cacheRead: 0.1, cacheWrite: 1, output: 3 },
+  });
+  const haiku = modelFixture({
+    id: "claude-3-5-haiku",
+    name: "Claude 3.5 Haiku",
+    provider: "anthropic",
+    api: "anthropic-messages",
+    baseUrl: "https://api.anthropic.com",
+    cost: { input: 0.8, cacheRead: 0.08, cacheWrite: 1, output: 4 },
+  });
+  const ctx = contextFixture({
+    cwd: process.cwd(),
+    model: gpt,
+    scopedModels: [],
+    modelRegistry: { getAvailable: () => [gpt, haiku] },
+    hasUI: false,
+    isIdle: () => true,
+    thinkingLevel: "off",
+    sessionManager: { getSessionId: () => "model-completion" },
+    ui: {
+      notify() {},
+      setStatus() {}, setWidget() {}, theme: { fg: (_: string, text: string) => text },
+    },
+  });
+  await command.handler("status", ctx);
+  const scopedCtx = contextFixture({ ...ctx, model: haiku, scopedModels: [{ model: haiku }] });
+  await command.handler("status", scopedCtx);
+  const scopedItems = command.getArgumentCompletions("model=") ?? [];
+  assert(scopedItems.some((item) => item.value === "model=anthropic/claude-3-5-haiku"),
+    "model suggestions should include the current session-scoped selection");
+  assert(!scopedItems.some((item) => item.value === "model=openai/gpt-5.6"),
+    "model suggestions should not offer models outside the current session scope");
+  await command.handler("status", ctx);
+
+  const initial = command.getArgumentCompletions("model=") ?? [];
+  assert(initial.some((item) => item.value === "model=all"), "model= should offer the all-model reset");
+  assert(initial.some((item) => item.value === "model=openai/gpt-5.6"), "model= should offer currently selectable models");
+  assert(initial.some((item) => item.value === "model=anthropic/claude-3-5-haiku"), "model= should include all selectable providers");
+  assert(initial.find((item) => item.value === "model=anthropic/claude-3-5-haiku")?.description?.includes("input $0.8/MTok"),
+    "model choices should show listed input pricing to help choose low-cost models");
+  assert(
+    (command.getArgumentCompletions("interval=4m model=") ?? []).some((item) => item.value === "interval=4m model=openai/gpt-5.6"),
+    "model suggestions should preserve preceding /warm settings",
+  );
+  assert(
+    (command.getArgumentCompletions("model=haiku") ?? []).some((item) => item.value === "model=anthropic/claude-3-5-haiku"),
+    "model suggestions should filter by model name as the user types",
+  );
+
+  await command.handler("model=anthropic/claude-3-5-haiku", ctx);
+  assert(saved?.warmModels.join(",") === "anthropic/claude-3-5-haiku", "selecting a model should save the allowlist");
+  const remaining = command.getArgumentCompletions("model=") ?? [];
+  assert(!remaining.some((item) => item.value === "model=anthropic/claude-3-5-haiku"),
+    "the completion menu should not offer a model already selected");
+  assert(remaining.some((item) => item.value === "model=openai/gpt-5.6"),
+    "the completion menu should allow adding another model");
+  await command.handler("model=all", ctx);
+  assert(saved?.warmModels.length === 0, "model=all should persist the default all-model policy");
 }
 
 {
