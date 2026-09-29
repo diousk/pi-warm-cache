@@ -1,6 +1,6 @@
 {
   "name": "@diousk/pi-warm-cache",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Pi extension that keeps supported provider prompt caches warm during long idle gaps",
   "type": "module",
   "keywords": [
@@ -26,6 +26,8 @@
   "files": [
     "src/compat.ts",
     "src/advisor.ts",
+    "src/claude-bridge.ts",
+    "src/claude-bridge-hook.ts",
     "src/capability.ts",
     "src/config.ts",
     "src/index.ts",
@@ -35,6 +37,8 @@
     "src/types.ts",
     "src/ui.ts",
     "src/warmer.ts",
+    "integrations/claude-bridge.md",
+    "integrations/claude-bridge-v0.9.0.patch",
     "README.md",
     "LICENSE"
   ],
