@@ -111,9 +111,9 @@ export function createClaudeBridgeCacheHook(pi: Pick<ExtensionAPI, "events">, de
     dispose(): void { unsubscribe(); subscribers.clear(); },
     capture(model: Model<any>, sessionId: string | null, realOptions: BridgeSdkOptions, tools: BridgeCacheTool[]): BridgeCacheCapture | undefined {
       const receive = sessionId ? subscribers.get(sessionId) : undefined;
-      if (!receive || model.provider !== "claude-bridge" || model.api !== "claude-bridge") return;
+      if (!receive || model.provider !== "claude-bridge" || model.api !== "claude-bridge") return undefined;
       const refusal = bridgeCacheRefusal(realOptions);
-      if (refusal) { receive({ kind: "unavailable", reason: refusal }); return; }
+      if (refusal) { receive({ kind: "unavailable", reason: refusal }); return undefined; }
       // Freeze prompt/tool/settings identity. Do not carry normal MCP handlers,
       // callbacks, AbortSignals, or mutable real output into a background fork.
       const inertTools = structuredClone(tools);
