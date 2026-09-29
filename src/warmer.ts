@@ -18,6 +18,7 @@ import {
   payloadObject,
   isSafeXaiReplayPayload,
   resolveMaxIdleWarmMs,
+  resolveMinCachedTokens,
   resolveProviderCapability,
   resolveStrategy,
   stableFingerprint,
@@ -26,6 +27,7 @@ import { formatDurationShort } from "./config.ts";
 import { appendWarmLog, warmLogPath, type WarmLogEvent } from "./log.ts";
 import {
   buildWarmResult,
+  formatProbeCost,
   formatSavingsLabel,
   formatSavingsSummary,
   resolveModelPricing,
@@ -152,6 +154,17 @@ export type CompleteRequest = ExtensionContext["modelRegistry"]["complete"];
 export interface SessionWarmerOptions {
   /** Replay Codex exactly when a side call must refresh its original endpoint. */
   exactCodexReplay?: boolean;
+  /** A cooperating provider owns replay; never dispatch an opaque anchor as HTTP. */
+  transport?: WarmReplayTransport;
+}
+
+export interface WarmReplayTransport {
+  supports(model: ExtensionContext["model"]): boolean;
+  capability<Payload>(payload?: Payload): ProviderCapability;
+  strategy(config: WarmCacheConfig): StrategyResolution;
+  isSafe<Payload>(payload: Payload): boolean;
+  isContinuation<Previous, Next>(previous: Previous, next: Next): boolean;
+  complete<Payload>(payload: Payload, config: WarmCacheConfig, signal: AbortSignal): Promise<import("@earendil-works/pi-ai").AssistantMessage>;
 }
 
 type EffectiveCodexReplayMode = Exclude<CodexWarmMode, "auto">;
@@ -316,7 +329,7 @@ export class SessionWarmer {
   ownsAutomaticWarming(ctx: ExtensionContext): boolean {
     if (!this.config.enabled) return false;
     const sameModel = this.anchor?.provider === ctx.model?.provider && this.anchor?.modelId === ctx.model?.id;
-    const capability = sameModel ? this.currentCapability(ctx) : resolveProviderCapability(ctx.model);
+    const capability = sameModel ? this.currentCapability(ctx) : this.resolveCapability(ctx.model);
     return capability.state === "verified";
   }
 
@@ -374,7 +387,19 @@ export class SessionWarmer {
 
   private currentCapability(ctx?: ExtensionContext | null): ProviderCapability {
     const context = ctx ?? this.ctx;
-    return this.anchor?.capability ?? this.capability ?? resolveProviderCapability(context?.model);
+    return this.anchor?.capability ?? this.capability ?? this.resolveCapability(context?.model);
+  }
+
+  private transport(model: ExtensionContext["model"]): WarmReplayTransport | undefined {
+    return this.options.transport?.supports(model) ? this.options.transport : undefined;
+  }
+
+  private resolveCapability<Payload>(model: ExtensionContext["model"], payload?: Payload): ProviderCapability {
+    return this.transport(model)?.capability(payload) ?? resolveProviderCapability(model, payload);
+  }
+
+  private resolvePlan<Payload>(model: NonNullable<ExtensionContext["model"]>, payload: Payload): StrategyResolution {
+    return this.transport(model)?.strategy(this.config) ?? resolveStrategy(model, this.config, payload);
   }
 
   /**
@@ -443,7 +468,7 @@ export class SessionWarmer {
       this.stateBeforeDisabled = null;
     }
     if (this.ctx?.model && this.lastPayload) {
-      this.plan = resolveStrategy(this.ctx.model, this.config, this.lastPayload);
+      this.plan = this.resolvePlan(this.ctx.model, this.lastPayload);
     }
     this.reschedule();
   }
@@ -482,7 +507,7 @@ export class SessionWarmer {
 
   bindContext(ctx: ExtensionContext): void {
     this.ctx = ctx;
-    this.capability = resolveProviderCapability(ctx.model);
+    this.capability = this.resolveCapability(ctx.model);
     if (!this.config.enabled) {
       this.stateBeforeDisabled = this.lifecycleState;
       this.lifecycleState = "disabled";
@@ -538,7 +563,7 @@ export class SessionWarmer {
     };
 
     this.ctx = ctx;
-    this.capability = resolveProviderCapability(ctx.model);
+    this.capability = this.resolveCapability(ctx.model);
     this.lastInvalidatedProbe = preserveProbe ? (this.anchor?.latestProbe ?? null) : null;
     this.anchor = null;
     this.lastPayload = null;
@@ -589,7 +614,7 @@ export class SessionWarmer {
   }
 
   /** Capture the exact provider payload from a real agent turn. Read-only. */
-  capturePayload<Payload>(payload: Payload, ctx: ExtensionContext): void {
+  capturePayload<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
     if (!payloadObject(payload)) return;
 
     this.anchorRevision += 1;
@@ -607,7 +632,7 @@ export class SessionWarmer {
     const model = ctx.model;
     if (model) probeSpendLedger.reset(model.provider);
     const cacheKeyFingerprint = getPromptCacheKeyFingerprint(payload, model?.api);
-    this.capability = resolveProviderCapability(model, payload);
+    this.capability = this.resolveCapability(model, payload);
 
     if (!model || this.capability.state === "unsupported") {
       this.anchor = null;
@@ -669,7 +694,8 @@ export class SessionWarmer {
     const payloadContinuation = Boolean(
       sameRoute &&
         previousPayload &&
-        (samePayload || isPayloadContinuation(previousPayload, payload, model.api)),
+        (samePayload || (this.transport(model)?.isContinuation(previousPayload, payload) ??
+          isPayloadContinuation(previousPayload, payload, model.api))),
     );
     const previousTurnObserved = Boolean(prev && prev.latestRealTurn.observedAt !== null);
     const comparableContinuation = payloadContinuation && previousTurnObserved;
@@ -706,15 +732,16 @@ export class SessionWarmer {
     // cache_control) and re-enable /warm now on an unsafe exact payload.
     // Restore the payload-aware resolution so the re-anchored anchor keeps the
     // refusal and manualProbeAvailable stays false for this captured body.
-    this.capability = resolveProviderCapability(model, payload);
+    this.capability = this.resolveCapability(model, payload);
 
     this.lastInvalidatedProbe = null;
     this.lastPayload = structuredClone(payload);
-    this.plan = resolveStrategy(model, this.config, this.lastPayload);
+    this.plan = this.resolvePlan(model, this.lastPayload);
     const reanchorTransition = this.pendingReanchor;
     const capturedAt = Date.now();
     const manualProbeAvailable =
-      this.capability.manualProbe && isSafeReplayPayload(this.lastPayload, model.api);
+      this.capability.manualProbe && (this.transport(model)?.isSafe(this.lastPayload) ??
+        isSafeReplayPayload(this.lastPayload, model.api));
     const codexReplayMode = this.resolveCodexReplayMode(model, prev, payloadContinuation);
 
     if (this.plan.longTtlDegradedReason && this.plan.longTtlDegradedReason !== this.lastLongTtlWarning) {
@@ -779,6 +806,7 @@ export class SessionWarmer {
       savingsKnown,
       pricingSource: pricing.source,
       lastActivityAt: capturedAt,
+      cacheRequestStartedAt: requestStartedAt,
       // Idle-cutoff base: only real turns refresh this clock. Probe hits never
       // touch it, so an idle session stops probing once the cutoff is reached.
       lastRealTurnAt: capturedAt,
@@ -919,7 +947,7 @@ export class SessionWarmer {
       output,
       cacheRead,
       cacheWrite,
-      minCachedTokens: this.config.minCachedTokens,
+      minCachedTokens: resolveMinCachedTokens(ctx.model, this.config.minCachedTokens),
       continuity: this.realTurnContinuity,
       continuityReason: this.anchor.latestRealTurn.reason,
       provider: this.anchor.provider,
@@ -989,7 +1017,7 @@ export class SessionWarmer {
     this.providerRequestInFlight = false;
     this.runningTools.clear();
     this.toolWarmProbeCount = 0;
-    this.capability = resolveProviderCapability(ctx.model);
+    this.capability = this.resolveCapability(ctx.model);
     if (!this.config.enabled) {
       this.stateBeforeDisabled = this.lifecycleState;
       this.lifecycleState = "disabled";
@@ -1062,11 +1090,11 @@ export class SessionWarmer {
   }
 
   /** Mark and capture a real provider request. Warm probes bypass this hook. */
-  onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext): void {
+  onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
     this.abort?.abort();
     this.clearTimers();
     this.providerRequestInFlight = true;
-    this.capturePayload(payload, ctx);
+    this.capturePayload(payload, ctx, requestStartedAt);
     this.showAgentWorking(ctx);
   }
 
@@ -1111,7 +1139,7 @@ export class SessionWarmer {
   /** Manual warm for /warm now */
   async warmNow(ctx: ExtensionContext): Promise<WarmResult> {
     this.ctx = ctx;
-    this.capability = resolveProviderCapability(ctx.model);
+    this.capability = this.resolveCapability(ctx.model);
     const result = await this.runWarm("manual");
     return this.withRouteDiagnostics(result);
   }
@@ -1169,6 +1197,7 @@ export class SessionWarmer {
       `strategy=${strategy}`,
       `cadence=${cadence}`,
       `intervalMs=${intervalMs ?? "none"}`,
+      `minCachedTokens=${resolveMinCachedTokens(model, this.config.minCachedTokens)}`,
       `nextDue=${nextDue}`,
       `activeWarmSessions=${activeWarmSessions}/${this.config.maxConcurrentWarmSessions}`,
       `deferred=${deferredProbe ? formatDeferralStatus(deferredProbe) : "none"}`,
@@ -1358,8 +1387,10 @@ export class SessionWarmer {
       return;
     }
     const knownPromptTokens = getKnownPromptTokens(anchor);
-    if (knownPromptTokens < this.config.minCachedTokens) {
-      this.showIdle(ctx, `prefix < ${this.config.minCachedTokens} tok`);
+    const minCachedTokens = resolveMinCachedTokens(ctx.model, this.config.minCachedTokens);
+    if (knownPromptTokens < minCachedTokens) {
+      this.clearTimers();
+      this.showIdle(ctx, `prefix < ${minCachedTokens} tok`);
       return;
     }
     if (anchor.consecutiveFailures >= this.config.maxConsecutiveFailures) {
@@ -1377,7 +1408,12 @@ export class SessionWarmer {
     if (options.delayMs !== undefined) {
       delay = Math.max(1_000, options.delayMs);
     } else {
-      const elapsed = Date.now() - anchor.lastActivityAt;
+      // Claude's TTL includes response generation time. Settlement and usage
+      // events must not grant an extra full interval after a long response.
+      const cadenceBase = anchor.cacheFamily === "anthropic-short" || anchor.cacheFamily === "anthropic-long"
+        ? anchor.cacheRequestStartedAt
+        : anchor.lastActivityAt;
+      const elapsed = Date.now() - cadenceBase;
       delay = Math.max(1_000, plan.intervalMs - elapsed);
     }
     if (toolWarmAllowed) {
@@ -1933,6 +1969,15 @@ export class SessionWarmer {
       };
     }
 
+    const minCachedTokens = resolveMinCachedTokens(ctx.model, this.config.minCachedTokens);
+    if (reason === "timer" && getKnownPromptTokens(anchor) < minCachedTokens) {
+      const detail = `prompt below minimum (${getKnownPromptTokens(anchor)} < ${minCachedTokens}); no provider request was sent`;
+      this.clearTimers();
+      this.recordAttempt(reason, false, detail);
+      this.showIdle(ctx, `prefix < ${minCachedTokens} tok`, detail);
+      return buildWarmResult({ fingerprint: anchor.payloadFingerprint, error: detail, unavailable: true, anchor });
+    }
+
     if (anchor.cacheFamily === "xai-best-effort" && !isSafeXaiReplayPayload(payload)) {
       const detail =
         "xAI best-effort probe requires an exact Responses payload with a stable prompt_cache_key; no provider request was sent";
@@ -2054,7 +2099,7 @@ export class SessionWarmer {
     // spurious route-changed invalidation on every warm probe. this.lastPayload
     // is nulled on invalidation and only set alongside a fresh anchor, so it is
     // the payload that produced anchor.capability.reason.
-    const currentCapability = resolveProviderCapability(model, payload);
+    const currentCapability = this.resolveCapability(model, payload);
     if (
       model.provider !== anchor.provider ||
       model.id !== anchor.modelId ||
@@ -2162,8 +2207,11 @@ export class SessionWarmer {
     if (codexReplayMode) warmStartLog.replayMode = codexReplayMode;
     this.log(warmStartLog);
 
+    let probeRequestStartedAt = Date.now();
     try {
-      const response = await resolveCompleteRequest(ctx, this.completeRequest)(
+      const response = this.transport(model)
+        ? await this.transport(model)!.complete(payload, this.config, probeAbort.signal)
+        : await resolveCompleteRequest(ctx, this.completeRequest)(
         model,
         {
           systemPrompt: "cache-warm",
@@ -2199,6 +2247,7 @@ export class SessionWarmer {
             const warmPayload = codex && codexReplayMode === "suffix"
               ? appendWarmUserTurn(cloned, this.config.warmSuffix, model.api)
               : cloned;
+            probeRequestStartedAt = Date.now();
             return xaiBestEffort
               ? applyXaiWarmOutputLimit(warmPayload, this.config.maxOutputTokens)
               : applyWarmOutputLimit(
@@ -2226,6 +2275,9 @@ export class SessionWarmer {
         usage: response.usage,
         anchor,
       });
+      if (result.cacheRead > 0 || result.cacheWrite > 0) {
+        anchor.cacheRequestStartedAt = probeRequestStartedAt;
+      }
       const usageSnap = {
         input: result.input,
         output: result.output,
@@ -2253,7 +2305,7 @@ export class SessionWarmer {
         const detail =
           `${unverifiedProbeLabel} ${payloadDrift ? "payload-drift" : result.cacheHit ? "hit" : "miss"} provider=${model.provider} api=${model.api} ` +
           `read=${result.cacheRead} write=${result.cacheWrite} in=${result.input} ` +
-          `out=${result.output} cost=${result.costUsd}`;
+          `out=${result.output} cost=${formatProbeCost(model.api, result.costUsd)}`;
         this.recordAttempt(reason, result.cacheHit, detail, usageSnap, outcome);
         if (payloadDrift) {
           this.enterAwaitingReanchor(
@@ -2333,9 +2385,9 @@ export class SessionWarmer {
         const detail = noWriteReanchor
           ? `${bestEffortLabel} probe ${outcome} read=0 write=0; ${omitWritePhrase}; ` +
             `retry=${anchor.consecutiveFailures}/${this.config.maxConsecutiveFailures} ` +
-            `in=${result.input} out=${result.output} cost=${result.costUsd}`
+            `in=${result.input} out=${result.output} cost=${formatProbeCost(model.api, result.costUsd)}`
           : `probe ${outcome} read=${result.cacheRead} write=${result.cacheWrite} ` +
-            `in=${result.input} out=${result.output} cost=${result.costUsd}`;
+            `in=${result.input} out=${result.output} cost=${formatProbeCost(model.api, result.costUsd)}`;
         this.recordAttempt(reason, false, detail, usageSnap, outcome);
 
         if (payloadDrift) {
@@ -2451,7 +2503,7 @@ function formatProbeStatus(observation: ProbeObservation | null): string {
     `write=${observation.cacheWrite}`,
     `in=${observation.input}`,
     `out=${observation.output}`,
-    `cost=$${observation.costUsd.toFixed(4)}`,
+    `cost=${formatProbeCost(observation.api, observation.costUsd)}`,
     observation.replayMode ? `replay=${observation.replayMode}` : "",
     `pfp=${observation.payloadFingerprint.slice(0, 8)}${observation.error ? ` error=${compactDiagnostic(observation.error)}` : ""})`,
   ]

@@ -27,7 +27,9 @@ File logging is optional. All evidence comes from:
    `cacheRead` is unambiguous in usage.
 
 2. Build a big prefix. Ask the agent to read a few large files so the prompt
-   prefix is clearly above 50k tokens (well over `minCachedTokens: 512`).
+   prefix is clearly above 50k tokens (well over the model's effective minimum).
+   `/warm status` shows `minCachedTokens`: 512 for Fable 5.1, Opus 5.5 or
+   Sonnet 5.5; 4,096 for Haiku 4.5. Pi must have the selected model registered.
 
    Do **two** real turns. Turn 1 writes the cache; turn 2 must show
    `cacheRead > 0`. If turn 2 shows no cache read, stop - the problem is Pi
@@ -46,11 +48,12 @@ File logging is optional. All evidence comes from:
    lifecycle=anchored
    capability=verified
    capabilityReason=first-party Anthropic Messages route with cache markers
-   provider=anthropic/claude-fable-5
+   provider=anthropic/claude-fable-5-1
    api=anthropic-messages
    strategy=anthropic-short
    cadence=5m prompt-cache TTL
    intervalMs=240000
+   minCachedTokens=512
    nextDue=<ISO timestamp>
    realTurn=hit (...)
    probe=none
@@ -161,10 +164,33 @@ cost claim, cross-check the Anthropic console usage for the test window.
 5. With `PI_WARM_CACHE_DEBUG=1`, confirm a `warm_deferred` event with `providerRequest=false` and confirm that the deferred tick did not call the provider.
 6. After the first probe completes, the deferred session should retry and clear its deferral state.
 
+## Claude response-time and marker checks
+
+1. Capture a real Claude request's start time, then let its response take about
+   three minutes. After settlement, `nextDue` should be about four minutes
+   after request start, not four minutes after response completion. If already
+   overdue, it should be due soon, subject to the existing safety gates.
+2. Repeat with `/warm advisor=on` and a Claude rpiv-advisor model. The independent
+   timer must use the advisor request's start, not the executor's clock or the
+   time when the completed request creates the advisor warmer.
+3. Inspect the outgoing probe in a local, redacted test capture. It must preserve
+   the real request's explicit or automatic `cache_control`, thinking settings,
+   signatures and effort. Only the API-legal output budget may change. Do not
+   commit credentials or prompt captures. Pi's streaming adapter must not send
+   `max_tokens: 0`.
+4. For Haiku 4.5, use a prompt below 4,096 total input tokens. Automatic warming
+   must not arm a timer, and a comparable real turn must be `unknown`, not
+   `miss`. Then test a cacheable prefix at or above the model minimum.
+
+These checks supplement, not replace, the warmed-versus-unwarmed real-turn
+control. Unit tests simulate usage and time; they do not establish live hits.
+
 ## Things that will make the test lie to you
 
-- **Anthropic 5m TTL is sliding.** Any background activity refreshes it for
-  free, so the control run can falsely "pass". Keep the terminal untouched.
+- **Anthropic 5m TTL is sliding from request start.** A request that reads or
+  writes the same cache entry refreshes it, so the control run can falsely
+  "pass". Keep the terminal untouched. Response generation consumes the TTL;
+  settlement does not grant another five minutes.
 - **Timers are `unref`'d** (`src/warmer.ts`, `unrefTimer`). In non-TUI or print
   modes, if nothing else holds the event loop open, ticks may never fire. Test
   in the interactive TUI.

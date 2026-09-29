@@ -55,11 +55,13 @@ function waitForStableFile(path, { samples = 3, gapMs = 25, maxMs = 1000 } = {})
 const providerFile = resolve(root, "src/provider.ts");
 const advisorFile = resolve(root, "src/advisor.ts");
 const advisorTestFile = resolve(root, "src/advisor.test.ts");
+const claudeTestFile = resolve(root, "src/claude.test.ts");
 
 waitForStableFile(testFile);
 waitForStableFile(providerFile);
 waitForStableFile(advisorFile);
 waitForStableFile(advisorTestFile);
+waitForStableFile(claudeTestFile);
 
 // Re-hash after stability wait so printed digests match what the suite loads.
 const digest = sha256File(testFile);
@@ -71,23 +73,21 @@ console.log(`[run-unit-tests] sha256=${digest}`);
 console.log(`[run-unit-tests] provider_sha256=${providerDigest}`);
 console.log(`[run-unit-tests] advisor_sha256=${sha256File(advisorFile)}`);
 console.log(`[run-unit-tests] advisor_test_sha256=${sha256File(advisorTestFile)}`);
+console.log(`[run-unit-tests] claude_test_sha256=${sha256File(claudeTestFile)}`);
 console.log(`[run-unit-tests] bytes=${bytes}`);
 
-const result = spawnSync(
-  process.execPath,
-  ["--experimental-strip-types", "--no-warnings", testFile],
-  {
-    cwd: root,
-    stdio: "inherit",
-  },
-);
-
-if (result.error) {
-  console.error(result.error);
-  process.exit(1);
+for (const file of [testFile, claudeTestFile, resolve(root, "src/claude-bridge.test.ts")]) {
+  const result = spawnSync(
+    process.execPath,
+    ["--experimental-strip-types", "--no-warnings", file],
+    { cwd: root, stdio: "inherit" },
+  );
+  if (result.error) {
+    console.error(result.error);
+    process.exit(1);
+  }
+  if (result.status !== 0) process.exit(result.status ?? 1);
 }
-
-if (result.status !== 0) process.exit(result.status ?? 1);
 const hostResult = spawnSync(process.execPath,
   ["--experimental-strip-types", "--no-warnings", resolve(root, "scripts/test-host-compat.mjs")],
   { cwd: root, stdio: "inherit" });

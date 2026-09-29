@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { mock } from "node:test";
 import type { Context, Model, Api, SimpleStreamOptions, AssistantMessage } from "@earendil-works/pi-ai";
 import type { ModelsApiStreamOptions } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -191,5 +192,36 @@ try {
   if (oldXdg === undefined) delete process.env.XDG_CONFIG_HOME;
   else process.env.XDG_CONFIG_HOME = oldXdg;
   rmSync(advisorTmpRoot, { recursive: true, force: true });
+}
+// Claude advisor generation time is part of its TTL. Observe dispatch after
+// the caller's payload hook, not when the completed side call creates a child.
+{
+  const start = Date.UTC(2026, 8, 29);
+  const claude = fixture<Model<Api>>({ id: "claude-opus-5-5", provider: "anthropic", api: "anthropic-messages", baseUrl: "https://api.anthropic.com/v1" });
+  const delayedRuntime = {
+    async completeSimple(m: Model<Api>, _context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage> {
+      await options?.onPayload?.({ model: m.id, cache_control: { type: "ephemeral" }, messages: [{ role: "user", content: "synthetic request" }] }, m);
+      mock.timers.setTime(start + 210_000);
+      return response;
+    },
+  };
+  const delayedContext = fixture<ExtensionContext>({
+    ...ctx,
+    modelRegistry: Object.assign(fixture<ExtensionContext["modelRegistry"]>({ complete: registry.complete }), { runtime: delayedRuntime }),
+  });
+  const delayedBridge = new AdvisorWarmer(pi);
+  mock.timers.enable({ apis: ["Date"], now: start });
+  try {
+    delayedBridge.configure({ ...DEFAULT_CONFIG, warmAdvisor: true }, delayedContext);
+    delayedBridge.toolStart("claude-advisor", "advisor");
+    await delayedRuntime.completeSimple(claude, context, {
+      onPayload: () => { mock.timers.setTime(start + 30_000); },
+    });
+    assert(delayedBridge.status().includes(`nextDue=${new Date(start + 270_000).toISOString()}`),
+      "Claude advisor deadline must include its three-minute response generation, after the original payload callback");
+  } finally {
+    delayedBridge.dispose();
+    mock.timers.reset();
+  }
 }
 console.log("advisor.test.ts: all assertions passed");

@@ -17,6 +17,11 @@ export function hasUsableSavingsPricing(input: number, cacheRead: number): boole
   return Number.isFinite(input) && Number.isFinite(cacheRead) && input > 0 && input > cacheRead;
 }
 
+/** Claude Code subscription usage has no USD price in Pi's bridge model entry. */
+export function formatProbeCost(api: string | undefined, costUsd: number): string {
+  return api === "claude-bridge" ? "n/a (Claude Code quota)" : `$${costUsd.toFixed(4)}`;
+}
+
 /**
  * Resolve pricing for savings estimates from the active model entry only.
  * Do not invent published catalog rates for zero-cost proxies (e.g. vibeproxy).

@@ -132,13 +132,18 @@ export class AdvisorWarmer {
     const sessionId = options?.sessionId ?? `warm-advisor-${digest(`${ctx.sessionManager.getSessionId()}:${model.provider}:${model.id}`)}`;
     const stamp = selectionStamp();
     let payload: unknown;
+    let requestStartedAt = Date.now();
     let requestModel = model;
     const requestOptions: SimpleStreamOptions = {
       ...options, sessionId,
       onPayload: async (body, resolvedModel) => {
         const replacement = await options?.onPayload?.(body, resolvedModel);
         // Observation must never make a working advisor call fail.
-        try { payload = structuredClone(replacement === undefined ? body : replacement); requestModel = resolvedModel; }
+        try {
+          payload = structuredClone(replacement === undefined ? body : replacement);
+          requestModel = resolvedModel;
+          requestStartedAt = Date.now();
+        }
         catch { payload = undefined; }
         return replacement;
       },
@@ -193,7 +198,7 @@ export class AdvisorWarmer {
         this.childApi = requestModel.api;
         child.setConfig(this.childConfig(this.config, requestModel.api));
         child.bindContext(childContext);
-        child.onProviderRequestStart(payload, childContext);
+        child.onProviderRequestStart(payload, childContext, requestStartedAt);
         child.onAssistantMessageEnd(childContext);
         child.noteAssistantUsage(childContext, response.usage);
         child.reschedule();

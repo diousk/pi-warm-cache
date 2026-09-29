@@ -1,0 +1,87 @@
+diff --git a/src/index.ts b/src/index.ts
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -26,6 +26,10 @@
+ import { buildActionSummary, type ToolCallState } from "./askclaude-ui.js";
+ import { askClaudeCallTags, askClaudeToolDescription, buildAskClaudeParams, resolveAskClaudeDefaults, resolveAskClaudeMode, type AskClaudeMode } from "./askclaude-schema.js";
+ import { nonSystemMessages, toBridgeContext } from "./transcript.js";
++import { createClaudeBridgeCacheHook, type BridgeCacheCapture, type BridgeSdkOptions } from "@diousk/pi-warm-cache/src/claude-bridge-hook.ts";
++
++let warmCacheHook: ReturnType<typeof createClaudeBridgeCacheHook> | undefined;
++const warmCacheCaptures = new WeakMap<QueryContext, BridgeCacheCapture>();
+ 
+ // --- Debug logging ---
+ // CLAUDE_BRIDGE_DEBUG=1 enables debug logging to ~/.pi/agent/claude-bridge.log
+@@ -1445,10 +1449,12 @@
+ 	model: Model<any>,
+ 	wasAborted: () => boolean,
+ 	queryCtx: QueryContext,
++	onCacheMessage?: (message: SDKMessage) => void,
+ ): Promise<{ capturedSessionId?: string }> {
+ 	let capturedSessionId: string | undefined;
+ 
+ 	for await (const message of sdkQuery) {
++		onCacheMessage?.(message);
+ 		if (RECORD_STREAM_PATH) appendFileSync(RECORD_STREAM_PATH, `${JSON.stringify(message)}\n`);
+ 		if (wasAborted()) break;
+ 		// Everything below the currentPiStream guard is content, which there is
+@@ -1762,6 +1768,7 @@
+ 	// (everything after the last assistant message) and match against waiting MCP
+ 	// handlers. Results that arrive before their handler get queued in pendingResults.
+ 	if (resultCtx) {
++		warmCacheCaptures.get(resultCtx)?.start();
+ 		claimCurrentPiStream(stream, "tool-result", resultCtx);
+ 		resultCtx.resetTurnState(model);
+ 		// A rewrite that armed the mark after this query parked gets copied here,
+@@ -1994,6 +2001,11 @@
+ 
+ 	// 3. Start SDK query and claim it for this context
+ 	let wasAborted = false;
++	// SAFETY: stock Pi-tools-only options; the cache hook validates unsupported SDK shapes.
++	const warmCapture = warmCacheHook?.capture(model, piSessionId, queryOptions as BridgeSdkOptions,
++		mcpTools.map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.parameters })));
++	if (warmCapture) warmCacheCaptures.set(queryCtx, warmCapture);
++	else warmCacheCaptures.delete(queryCtx);
+ 	const sdkQuery = queryImpl({ prompt: promptStream.stream, options: queryOptions });
+ 	queryCtx.activeQuery = sdkQuery;
+ 	activeQueryContexts.add(queryCtx);
+@@ -2009,6 +2021,7 @@
+ 	};
+ 	const onAbort = () => {
+ 		wasAborted = true;
++		warmCapture?.invalidate();
+ 		drainForAbort(abortCtx, promptStream);
+ 		requestAbort();
+ 	};
+@@ -2018,7 +2031,7 @@
+ 	}
+ 
+ 	// Background consumer — runs until query ends
+-	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx)
++	consumeQuery(sdkQuery, customToolNameToPi, model, () => wasAborted, queryCtx, warmCapture?.observe)
+ 		.then(async ({ capturedSessionId }) => {
+ 			debug(`provider: consumeQuery completed, stopReason=${queryCtx.turnOutput?.stopReason}, error=${queryCtx.turnOutput?.errorMessage}, aborted=${wasAborted}`);
+ 
+@@ -2337,6 +2350,15 @@
+ let askClaudeToolName = "AskClaude";
+ 
+ export default function (pi: ExtensionAPI) {
++	warmCacheHook ??= createClaudeBridgeCacheHook(pi, {
++		query: (prompt, options) => query({ prompt, options: options as NonNullable<Parameters<typeof query>[0]["options"]> }),
++		inertMcpServers: (tools) => tools.length ? {
++			[MCP_SERVER_NAME]: createToolServer(MCP_SERVER_NAME, tools.map((tool) => ({ ...tool,
++				handler: async (toolCallId: string) => ({ toolCallId, isError: true,
++					content: [{ type: "text" as const, text: "Cache keepalive never executes tools" }] }),
++			}))),
++		} : undefined,
++	});
+ 	// Disable non-essential Claude Code traffic (update checks, MCP registry, telemetry)
+ 	process.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+ 
+@@ -2447,4 +2469,6 @@
+ 	pi.on("session_shutdown", () => {
++		warmCacheHook?.dispose();
++		warmCacheHook = undefined;
+ 		reportLeaks("session_shutdown");
+ 		clearSession("session_shutdown");
+ 	});

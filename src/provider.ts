@@ -140,6 +140,46 @@ export function isAnthropicModel(model: Model<any> | undefined): boolean {
   return getModelCompat(model)?.cacheControlFormat === "anthropic";
 }
 
+/** Claude API cache floors, including dated IDs and Pi's dotted aliases. */
+const CLAUDE_MIN_CACHE_TOKENS = new Map([
+  ["claude-fable-5-1", 512],
+  ["claude-mythos-5-1", 512],
+  ["claude-opus-5-5", 512],
+  ["claude-opus-5", 512],
+  ["claude-sonnet-5-5", 512],
+  ["claude-fable-5", 512],
+  ["claude-mythos-5", 512],
+  ["claude-mythos-preview", 2048],
+  ["claude-opus-4-7", 2048],
+  ["claude-opus-4-6", 4096],
+  ["claude-opus-4-5", 4096],
+  ["claude-opus-4-8", 1024],
+  ["claude-sonnet-5", 1024],
+  ["claude-sonnet-4-6", 1024],
+  ["claude-sonnet-4-5", 1024],
+  ["claude-opus-4-1", 1024],
+  ["claude-opus-4", 1024],
+  ["claude-sonnet-4", 1024],
+  ["claude-haiku-4-5", 4096],
+  ["claude-haiku-3-5", 2048],
+  ["claude-3-5-haiku", 2048],
+]);
+
+/**
+ * A user can raise the automatic-warm floor, but cannot lower a known Claude
+ * minimum. Unknown models and non-Claude compatible APIs keep their configured
+ * floor. See https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
+ */
+export function resolveMinCachedTokens(model: Model<any> | undefined, configuredMin: number): number {
+  if (!model || (!isAnthropicModel(model) &&
+      !(model.provider === "claude-bridge" && model.api === "claude-bridge"))) return configuredMin;
+  const id = model.id.toLowerCase()
+    .replace(/^anthropic\//, "")
+    .replace(/\.(?=\d)/g, "-")
+    .replace(/-(?:\d{8}|latest)$/, "");
+  return Math.max(configuredMin, CLAUDE_MIN_CACHE_TOKENS.get(id) ?? 0);
+}
+
 export function isOpenAIModel(model: Model<any> | undefined): boolean {
   if (!model || isAnthropicModel(model)) return false;
   return (

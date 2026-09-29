@@ -8,7 +8,7 @@ The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
 The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
-CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, and the latest
+CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, and the latest
 stable release on each push to main and pull request. The latest job resolves one
 version for all three Pi packages. Development dependencies remain pinned to
 0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
@@ -45,7 +45,8 @@ The extension copies the last real provider request and replays it with
 provider-legal output controls. Most routes use a tiny output limit; the Codex
 endpoint rejects output-limit fields, so exact Codex replay is deliberately
 uncapped and protected by an oversized-output guard.
-It does not rebuild the conversation.
+Native API replay does not rebuild the conversation. The optional Claude Code
+bridge adapter instead refreshes a shared prefix in an isolated, unsaved SDK fork.
 It does not change your real turns.
 It does not run tools.
 
@@ -107,6 +108,7 @@ Automatic keepalive is on for these registered routes:
 | Route | What you get |
 |---|---|
 | Anthropic | Probe about every 4 minutes, or about every 48 minutes when the request already uses a 1-hour cache |
+| Claude Code / `claude-bridge` (experimental adapter) | Session-scoped SDK prefix warming, including long Pi tools; requires the cooperating bridge patch, not the stock npm bridge |
 | OpenAI | Probe on the explicit or implicit cache window for that model |
 | Azure OpenAI | Same OpenAI response strategy |
 | OpenAI Codex | Adaptive replay by default; switches from the bounded suffix to exact replay when a suffix hit is followed by a comparable real-turn miss |
@@ -161,13 +163,73 @@ If probes keep returning no cache read, warming stops until the next real turn.
 
 OpenCode Go must use the registered endpoints: Anthropic at `https://opencode.ai/zen/go`, and OpenAI-style APIs at `https://opencode.ai/zen/go/v1`.
 
+### Claude Code via `pi-claude-bridge`
+
+The optional [bridge adapter setup and validation guide](integrations/claude-bridge.md)
+uses Claude Code's existing login and official Agent SDK. **Stock bridge 0.9.0
+is not enabled just by updating this package**; it needs the supplied versioned
+adapter patch. The normal session stays unchanged and probe tools are inert.
+
+It shares `/warm` settings and the normal scheduler. The bridge uses actual SDK
+cache-write usage to distinguish a 1-hour-only prefix (normally refreshed at
+50 minutes) from a 5-minute/mixed or unknown prefix (at most 4 minutes). An
+explicit `/warm 5m` keeps the short cadence. The 15-second UI updates,
+long-tool policy and two-consecutive-miss stop still apply. Unlike
+native Messages API replay, probes may use more than one output/thinking token
+to preserve Claude Code's implicit cache identity. SDK usage consumes quota;
+zero bridge prices do not mean free requests. See the guide before enabling.
+
+### Current Claude models (native Messages API)
+
+Claude Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 4.5 use the existing
+Anthropic Messages replay path; no extension model whitelist is required.
+Pi must still register the selected model. This extension does not ship or
+replace Pi's model catalog; update Pi or configure a custom model if its ID
+is absent. Provider/endpoint safety checks remain unchanged.
+
+Automatic warming uses the greater of `minCachedTokens` (default 512) and
+the known Claude model minimum:
+
+| Claude models | Minimum tokens |
+|---|---:|
+| Fable 5.1 / 5, Mythos 5.1 / 5, Opus 5.5 / 5, Sonnet 5.5 | 512 |
+| Opus 4.8 / 4.1 / 4, Sonnet 5 / 4.6 / 4.5 / 4 | 1,024 |
+| Mythos Preview, Opus 4.7, Haiku 3.5 | 2,048 |
+| Opus 4.6 / 4.5, Haiku 4.5 | 4,096 |
+
+Dated IDs and dotted aliases are recognized. Unknown models and non-Claude
+Anthropic-compatible models retain the configured threshold. `/warm status`
+shows the effective `minCachedTokens`; `/warm config` shows the saved setting.
+Below the effective threshold, comparable real turns are classified `unknown`
+rather than misses, and automatic probes are skipped. `/warm now` remains a
+manual diagnostic probe. Total prompt usage is only an eligibility hint:
+the prefix ending at a cache breakpoint must itself reach the minimum.
+
+Claude deadlines count from **request start**, including time spent generating
+the response. For example, a three-minute response leaves about one minute
+until the default four-minute refresh. An overdue refresh is scheduled as soon
+as eligible. The same timing applies to independent rpiv-advisor requests and
+to the probes themselves. Tool minimum-runtime, concurrency and other safety
+gates can still delay a refresh beyond the TTL; warming is not guaranteed
+while those gates apply. Other providers retain their existing cadence.
+
+Captured block-level and top-level automatic `cache_control` settings, thinking
+and `output_config.effort` are replayed unchanged. The extension never adds
+another breakpoint or upgrades the request to a 1-hour TTL. It retains the
+stream-compatible one-token probe (or the legal thinking-budget minimum).
+Claude's zero-output `max_tokens: 0` prewarm mode cannot be used with Pi's
+current streaming adapter, so it is not enabled here.
+
+See [Anthropic prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
+and [the Claude model overview](https://platform.claude.com/docs/en/models/overview).
+
 ## When this helps
 
 Use it when a supported route holds a large prompt and you often leave Pi idle long enough for the cache to expire.
 
 It does not help when:
 
-- The prompt is below the minimum cached-token threshold (default 512)
+- The prompt is below the effective minimum cached-token threshold (default 512, raised for known Claude models)
 - The route is unsupported or manual-only (no timer)
 - The model has no usable prices (savings show `n/a`)
 - You just compacted, changed model, or changed thinking level (wait for the next real turn)
@@ -199,7 +261,8 @@ This changes cache routing for opted-in requests, not their conversation content
 Each completed successful rpiv-advisor request supplies an independent payload
 and timer. Codex rpiv-advisor warming caps the effective interval at three minutes because live
 tests found the four-minute boundary could already miss; a shorter configured
-interval is preserved. Other advisor routes use the configured interval.
+interval is preserved. Other advisor routes use the configured interval;
+Claude advisor deadlines count from the original request's dispatch, not its completion.
 Provider eligibility, idle cutoff, output,
 failure, spend, and process-wide concurrency safeguards still apply. rpiv-advisor
 probes do not enter session history and do not invoke advisor tools.

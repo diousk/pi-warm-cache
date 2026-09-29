@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pi: ["0.85.1", "0.86.0", "0.86.1", "latest"]
+        pi: ["0.85.1", "0.86.0", "0.86.1", "0.87.1", "latest"]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1

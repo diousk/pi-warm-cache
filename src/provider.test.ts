@@ -4149,7 +4149,7 @@ function deepEqualExcept<Actual, Expected>(
   longWarmer.bindContext(ctx);
   longWarmer.setConfig({ ...DEFAULT_CONFIG, minCachedTokens: 10, logToFile: true });
   longWarmer.capturePayload(longPayload, ctx);
-  longWarmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  longWarmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 2048, cacheWrite: 0, output: 2 });
   assert(
     longWarmer.getStatusText().includes("strategy=anthropic-long"),
     "the 1h-marker payload must classify anthropic-long",
@@ -4205,7 +4205,7 @@ function deepEqualExcept<Actual, Expected>(
   shortWarmer.bindContext(ctx);
   shortWarmer.setConfig({ ...DEFAULT_CONFIG, minCachedTokens: 10 });
   shortWarmer.capturePayload(shortPayload, ctx);
-  shortWarmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+  shortWarmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 2048, cacheWrite: 0, output: 2 });
   assert(shortWarmer.getStatusText().includes("strategy=anthropic-short"), "the short payload must classify anthropic-short");
   assert(
     resolveMaxIdleWarmMs(shortWarmer.getConfig(), "anthropic-short") === 30 * 60_000,

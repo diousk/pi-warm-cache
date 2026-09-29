@@ -22,12 +22,12 @@ pnpm lint
 
 `pnpm lint` uses the local anti-slop plugin in `tools/oxlint/anti-slop/`.
 
-The compatibility matrix covers Pi 0.85.1, 0.86.0, 0.86.1, and `latest`. Keep development
+The compatibility matrix covers Pi 0.85.1, 0.86.0, 0.86.1, 0.87.1, and `latest`. Keep development
 dependencies and the committed lockfile on 0.85.1. In a disposable checkout,
 install all three Pi packages at the same target version and run the same checks:
 
 ```bash
-pnpm add -D --save-exact @earendil-works/pi-ai@0.86.1 @earendil-works/pi-coding-agent@0.86.1 @earendil-works/pi-tui@0.86.1
+pnpm add -D --save-exact @earendil-works/pi-ai@0.87.1 @earendil-works/pi-coding-agent@0.87.1 @earendil-works/pi-tui@0.87.1
 pnpm test
 pnpm typecheck
 pnpm lint

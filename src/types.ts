@@ -215,8 +215,10 @@ export interface CacheAnchor {
   savingsKnown: boolean;
   /** Where input/cacheRead prices came from. */
   pricingSource: "model" | "unknown";
-  /** Wall clock of last real agent activity that refreshed the cache. */
+  /** Last completed activity; used for non-Anthropic warm cadence. */
   lastActivityAt: number;
+  /** Start of the latest real or cache-touching probe request. Anthropic TTL starts here. */
+  cacheRequestStartedAt: number;
   /**
    * Wall clock of the last real turn (capturePayload / noteAssistantUsage).
    * Probe hits never refresh this clock; it is the idle-cutoff base.
@@ -280,7 +282,7 @@ export interface WarmResult {
 export interface StrategyPlan {
   family: CacheFamily;
   cacheRetention: CacheRetention;
-  /** Delay from last activity until next warm attempt. Null means no timer. */
+  /** Warm cadence; Anthropic counts from request start. Null means no timer. */
   intervalMs: number | null;
   /** Human label for UI, e.g. "5m prompt-cache TTL". */
   ttlLabel: string;

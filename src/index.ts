@@ -19,6 +19,8 @@ import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
 import { AdvisorWarmer } from "./advisor.ts";
+import { formatProbeCost } from "./savings.ts";
+import { ClaudeBridgeTransport } from "./claude-bridge.ts";
 import { NativeWarmingCoordinator, onNativeWarmingDecision } from "./compat.ts";
 import { clearWarmUi, renderCapabilityNotice, renderIdleUi } from "./ui.ts";
 
@@ -68,7 +70,9 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
 }
 
 export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
-  const warmer = new SessionWarmer(pi);
+  const bridge = new ClaudeBridgeTransport(pi);
+  const warmer = new SessionWarmer(pi, undefined, { transport: bridge });
+  bridge.bind(warmer);
   const advisorWarmer = new AdvisorWarmer(pi);
   const nativeWarming = new NativeWarmingCoordinator();
   onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
@@ -86,7 +90,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   pi.on("session_start", async (event, ctx) => {
     nativeWarming.onRealTurn();
     advisorWarmer.dispose();
-    warmer.bindContext(ctx);
+    bridge.dispose();
 
     const loaded = loadConfigJson();
     config = loaded.config;
@@ -113,6 +117,8 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
     }
 
+    bridge.configure(ctx, config);
+    warmer.bindContext(ctx);
     warmer.setConfig(config);
     advisorWarmer.configure(config, ctx);
 
@@ -141,29 +147,35 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
   pi.on("session_shutdown", async () => {
     nativeWarming.onRealTurn();
     advisorWarmer.dispose();
+    bridge.dispose();
     lastCapabilityNoticeKey = null;
     warmer.dispose();
   });
 
   pi.on("model_select", async (_event, ctx) => {
+    bridge.invalidate();
+    bridge.configure(ctx, config);
     warmer.bindContext(ctx);
     warmer.onModelChange(ctx);
   });
 
   pi.on("thinking_level_select", async (_event, ctx) => {
     // Effort is part of many cache keys. Force re-anchor.
+    bridge.invalidate();
     warmer.bindContext(ctx);
     warmer.onModelChange(ctx);
   });
 
   // Compaction changes the prompt prefix. Old payload must not be replayed.
   pi.on("session_compact", async (_event, ctx) => {
+    bridge.invalidate();
     advisorWarmer.invalidate("compacted; waiting for advisor");
     warmer.invalidateAnchor(ctx, "compacted · waiting for next turn");
   });
 
   // Branch / tree navigation changes the active prefix.
   pi.on("session_tree", async (_event, ctx) => {
+    bridge.invalidate();
     advisorWarmer.invalidate("branch changed; waiting for advisor");
     warmer.invalidateAnchor(ctx, "branch changed · waiting for next turn");
   });
@@ -296,7 +308,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
           `capability=${result.capabilityState ?? "unknown"} reason=${result.capabilityReason ?? "unknown"}`;
         const usage =
           `extensionProbe read=${result.cacheRead} write=${result.cacheWrite} in=${result.input} ` +
-          `out=${result.output} cost=$${result.costUsd.toFixed(4)}`;
+          `out=${result.output} cost=${formatProbeCost(result.api, result.costUsd)}`;
         const fingerprint = `pfp=${result.fingerprint ? result.fingerprint.slice(0, 8) : "none"}`;
         const strategy =
           `strategy=${result.family ?? "unknown"} cadence=${result.strategyLabel ?? "unknown"} ` +
@@ -409,6 +421,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
       if (lower === "codex-on" || lower === "codex-off") {
         config = parseConfigArgs(trimmed, warmer.getConfig());
+        bridge.configure(ctx, config);
         warmer.bindContext(ctx);
         if (lower === "codex-on") {
           warmer.clearAutoWarmBlock("user /warm codex-on");
@@ -426,6 +439,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
 
       config = parseConfigArgs(trimmed, warmer.getConfig());
+      bridge.configure(ctx, config);
       warmer.bindContext(ctx);
       if (resumeRequested && config.enabled) {
         warmer.clearAutoWarmBlock("user /warm on");
