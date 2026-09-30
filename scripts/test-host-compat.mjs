@@ -1,4 +1,4 @@
-// Exercise the installed Pi loader and (on 0.86) its actual CacheWarmer.
+// Exercise the installed Pi loader and (on 0.86+) its actual CacheWarmer.
 // All provider calls are in-memory; no credentials or network are used.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import * as ai from "@earendil-works/pi-ai";
 import piWarmCache from "../src/index.ts";
 import { currentInstructions } from "../src/compat.ts";
+import { applyWarmProbePayload, resolveStrategy } from "../src/provider.ts";
 import { AdvisorWarmer, isAdvisorRequest, ADVISOR_PROMPT_SHA256 } from "../src/advisor.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 import { createHash } from "node:crypto";
@@ -17,7 +18,7 @@ for (const name of ["pi-ai", "pi-tui"]) {
   const installed = JSON.parse(readFileSync(new URL(`../${name}/package.json`, root), "utf8"));
   assert.equal(installed.version, version, "compatibility tests require matching Pi package versions");
 }
-const [major, minor] = version.split(".").map(Number);
+const [major, minor, patch] = version.split(".").map(Number);
 const expectsNativeWarming = major > 0 || minor >= 86;
 const nativeModule = new URL("dist/core/cache-warmer.js", root);
 const hasNativeWarming = existsSync(nativeModule);
@@ -157,6 +158,51 @@ try {
       assert.equal(await status(), disabledStatus, "native request must not reset extension state");
     } finally { native.cancel(); mock.timers.reset(); }
     console.log(`native CacheWarmer: Pi ${version} active/idle veto and delegation passed`);
+  }
+  if (major > 0 || minor > 99 || (minor === 99 && patch >= 1)) {
+    // Exercise the real Sol catalog and Responses adapter with an in-memory
+    // HTTP response. No auth tokens, provider calls, or paid cache writes.
+    const { builtinModels } = await import("@earendil-works/pi-ai/providers/all");
+    const sol = builtinModels().getModel("openai", "gpt-6.1-sol");
+    assert(sol, `Pi ${version}: GPT-6.1 Sol catalog entry must exist`);
+    assert.equal(sol.cost.cacheRead, sol.cost.input * 0.05);
+    assert.equal(sol.cost.cacheWrite, sol.cost.input * 1.25);
+    assert.equal(resolveStrategy(sol, { ...DEFAULT_CONFIG, intervalMs: null }).intervalMs, 24 * 60_000);
+    const { stream } = await import("@earendil-works/pi-ai/api/openai-responses");
+    const captured = {
+      model: sol.id, stream: true, input: [{ role: "user", content: "cache fixture" }],
+      prompt_cache_key: "sol-test-session", prompt_cache_options: { ttl: "30m" },
+      reasoning: { effort: "low" }, max_output_tokens: 4096,
+    };
+    for (const [cached, written] of [[2000, 0], [0, 2000]]) {
+      let calls = 0;
+      const message = await stream(sol, ai.normalizeContext({ messages: [] }), {
+        apiKey: "fake-test-key", maxRetries: 0,
+        onPayload: () => applyWarmProbePayload(structuredClone(captured), 1, sol),
+        fetch: async (_url, init) => {
+          calls++;
+          assert.deepEqual(JSON.parse(init.body), {
+            ...captured, prompt_cache_options: { ttl: "30m", prewarm: true },
+          });
+          const event = { type: "response.completed", response: {
+            id: "resp_sol_prewarm", status: "completed", output: [],
+            usage: { input_tokens: 2000, output_tokens: 0, total_tokens: 2000,
+              input_tokens_details: { cached_tokens: cached, cache_write_tokens: written } },
+          } };
+          return new Response(`event: response.completed\ndata: ${JSON.stringify(event)}\n\n`, {
+            status: 200, headers: { "content-type": "text/event-stream" },
+          });
+        },
+      }).result();
+      assert.equal(calls, 1);
+      assert.equal(message.stopReason, "stop", message.errorMessage);
+      assert.deepEqual(message.content, []);
+      assert.equal(message.usage.output, 0);
+      assert.equal(message.usage.cacheRead, cached);
+      assert.equal(message.usage.cacheWrite, written);
+      assert.equal(message.usage.cost.total, cached ? 0.0002 : 0.005);
+    }
+    console.log(`Sol prewarm: Pi ${version} real adapter, zero output, read/write pricing passed`);
   }
   assert.equal(probeCalls, 0);
   console.log(`host compatibility: Pi ${version} passed`);

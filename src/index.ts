@@ -8,8 +8,9 @@
  *    This hook is READ-ONLY. We never rewrite real user turns.
  * 2. After the agent settles, start a provider-specific timer (4m / 50m / 24m / ...).
  * 3. On tick, replay that payload with provider-legal output controls via
- *    `modelRegistry.complete({ onPayload })`; Codex exact replay has no hard
- *    output cap because its endpoint rejects one.
+ *    `modelRegistry.complete({ onPayload })`: supported direct OpenAI Responses
+ *    uses no-output prewarming; Codex exact replay has no hard output cap
+ *    because its endpoint rejects one.
  * 4. Never use `sendUserMessage` for warming (would pollute the session and run tools).
  */
 

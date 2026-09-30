@@ -8,7 +8,7 @@ The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
 The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
-CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, and the latest
+CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, 0.99.1, and the latest
 stable release on each push to main and pull request. The latest job resolves one
 version for all three Pi packages. Development dependencies remain pinned to
 0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
@@ -42,7 +42,8 @@ prompts and effective nonempty tool inventories still fail closed.
 ## How it works
 
 The extension copies the last real provider request and replays it with
-provider-legal output controls. Most routes use a tiny output limit; the Codex
+provider-legal output controls. Supported direct OpenAI Responses models use
+no-output prewarming; most other routes use a tiny output limit. The Codex
 endpoint rejects output-limit fields, so exact Codex replay is deliberately
 uncapped and protected by an oversized-output guard.
 Native API replay does not rebuild the conversation. The optional Claude Code
@@ -109,12 +110,39 @@ Automatic keepalive is on for these registered routes:
 |---|---|
 | Anthropic | Probe about every 4 minutes, or about every 48 minutes when the request already uses a 1-hour cache |
 | Claude Code / `claude-bridge` (experimental adapter) | Session-scoped SDK prefix warming, including long Pi tools; requires the cooperating bridge patch, not the stock npm bridge |
-| OpenAI | Probe on the explicit or implicit cache window for that model |
+| OpenAI | No-output prewarm on supported GPT-5.6+ Responses models; capped replay on older models |
 | Azure OpenAI | Same OpenAI response strategy |
 | OpenAI Codex | Adaptive replay by default; switches from the bounded suffix to exact replay when a suffix hit is followed by a comparable real-turn miss |
 | GitHub Copilot | Automatic warming for keyed Responses, Completions, and Anthropic models whose captured request contains cache markers |
 | xAI Grok 4.5 | Best-effort probe about every 4 minutes when the request has a stable cache key |
 | OpenCode Go (default setup) | Keepalive on short Anthropic and keyed Responses routes; no timer on Completions because that cache already lasts a long time |
+
+### GPT-6.1 Sol (Pi 0.99.1+)
+
+On direct OpenAI Responses, GPT-6.1 Sol uses
+`prompt_cache_options.prewarm: true` for probes, refreshing the cache without
+generating output. Existing TTL, caching mode, breakpoints, cache key, reasoning,
+tools, and input are preserved; real requests are never changed. Pi's explicit
+cache capability flag selects this behavior, not a model-name allowlist.
+The same documented prewarm mechanism applies to supported GPT-5.6+ models.
+
+The cache lifetime is at least 30 minutes after the latest write or reuse, with
+a refresh at about 24 minutes when using `/warm auto` (an explicit interval
+still overrides the provider cadence). Sol cache reads cost 5% of uncached
+input and writes cost 125%; savings estimates use the active Pi catalog's base
+prices rather than hardcoded model rates. Cacheable prefixes must have
+at least 1,024 tokens. A cold prewarm still incurs a cache-write charge.
+
+This no-output mechanism is restricted to `openai` / `openai-responses` at
+`https://api.openai.com`. Azure, proxy routes, and the legacy OpenAI Codex
+subscription endpoint retain their existing replay policies; the OpenAI API's
+prewarm field is not assumed to work there.
+
+Sources: [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
+The Pi 0.99.1 host test verifies the catalog prices and real Responses adapter
+with mocked HTTP responses for both cache reads and writes. It is not a live
+provider cache-hit guarantee.
 
 `/warm now` is a one-shot probe.
 It does not start a timer.

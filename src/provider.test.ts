@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import {
   appendWarmUserTurn,
   applyWarmOutputLimit,
+  applyWarmProbePayload,
   applyXaiWarmOutputLimit,
   bestEffortFamilyLabel,
   canManualProbe,
@@ -47,6 +48,7 @@ import {
   resolveCacheFamily,
   resolveCacheRetention,
   resolveMaxIdleWarmMs,
+  resolveMinCachedTokens,
   resolveProviderCapability,
   resolveStrategy,
   stableFingerprint,
@@ -320,6 +322,81 @@ function deepEqualExcept<Actual, Expected>(
     `openai-responses floor ${OPENAI_RESPONSES_MIN_OUTPUT_TOKENS}, got ${out.max_output_tokens}`,
   );
   deepEqualExcept(original, out, WARM_MUTABLE_PAYLOAD_KEYS);
+}
+
+// GPT-6.1 Sol: no-output prewarming preserves the complete real cache prefix.
+{
+  const sol = modelFixture({
+    id: "gpt-6.1-sol", provider: "openai", api: "openai-responses",
+    baseUrl: "https://api.openai.com/v1",
+    compat: { supportsExplicitPromptCacheMode: true },
+    cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+  });
+  assert(resolveMinCachedTokens(sol, 512) === 1024, "Sol automatic warming must enforce its cache minimum");
+  assert(resolveMinCachedTokens(sol, 4096) === 4096, "a higher configured cache minimum must win");
+  const original = {
+    model: sol.id, max_output_tokens: 8192, prompt_cache_key: "sol-session",
+    prompt_cache_options: { mode: "implicit", ttl: "30m", prewarm: false },
+    reasoning: { effort: "low", context: "all_turns" },
+    input: [{ role: "developer", content: [{ type: "input_text", text: "stable context",
+      prompt_cache_breakpoint: { mode: "explicit" } }] }],
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
+  };
+  const out = applyWarmProbePayload(structuredClone(original), 1, sol);
+  assert(out.prompt_cache_options.prewarm === true, "Sol probe must request no output");
+  assert(original.prompt_cache_options.prewarm === false, "real payload must remain unchanged");
+  deepEqualExcept(original, out, new Set(["prompt_cache_options"]));
+  assert(out.prompt_cache_options.mode === "implicit" && out.prompt_cache_options.ttl === "30m",
+    "prewarming must preserve mode and TTL");
+  const defaultOptions = payloadObject(applyWarmProbePayload({
+    model: sol.id, input: original.input,
+  }, 1, sol));
+  assert(payloadObject(defaultOptions?.prompt_cache_options)?.prewarm === true,
+    "short retention with omitted cache options also supports prewarming");
+  assert(defaultOptions && !("max_output_tokens" in defaultOptions), "prewarm needs no generated-output cap");
+  const strategy = resolveStrategy(sol, { ...DEFAULT_CONFIG, intervalMs: null }, original);
+  assert(strategy.family === "openai-explicit" && strategy.intervalMs === 24 * 60_000,
+    "Sol must refresh inside its 30-minute lifetime");
+
+  // Model names alone and compatible transports must never enable the field.
+  for (const other of [
+    modelFixture({ ...sol, compat: {} }),
+    modelFixture({ ...sol, provider: "azure-openai", api: "azure-openai-responses" }),
+    modelFixture({ ...sol, provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }),
+    modelFixture({ ...sol, baseUrl: "https://api.openai.com.proxy.invalid/v1" }),
+    modelFixture({ ...sol, api: "openai-completions" }),
+    modelFixture({ ...sol, provider: "openai-codex", api: "openai-codex-responses",
+      baseUrl: "https://chatgpt.com/backend-api" }),
+  ]) {
+    const fallback = payloadObject(applyWarmProbePayload(structuredClone(original), 1, other));
+    assert(payloadObject(fallback?.prompt_cache_options)?.prewarm === false,
+      `${other.provider}/${other.api} must retain its existing replay behavior`);
+  }
+
+  const ctx = contextFixture({
+    cwd: process.cwd(), model: sol, hasUI: false, isIdle: () => true,
+    sessionManager: { getSessionId: () => "sol-session" },
+  });
+  const complete = completeFixture(async (_model: Model<any>, _context: WarmCompleteContext,
+    options?: ProbeRequestOptions) => {
+    const replay = payloadObject(options?.onPayload?.({}, sol));
+    assert(payloadObject(replay?.prompt_cache_options)?.prewarm === true,
+      "SessionWarmer must dispatch a prewarm body, not just the helper test");
+    deepEqualExcept(original, replay, new Set(["prompt_cache_options"]));
+    return { stopReason: "stop" as const,
+      usage: { input: 0, output: 0, cacheRead: 2000, cacheWrite: 0, cost: { total: 0.0002 } } };
+  });
+  const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "low" }), complete);
+  try {
+    warmer.bindContext(ctx);
+    warmer.setConfig({ ...DEFAULT_CONFIG, minCachedTokens: 1024 });
+    warmer.capturePayload(original, ctx);
+    warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+    const result = await warmer.warmNow(ctx);
+    assert(result.ok && result.cacheHit && result.output === 0,
+      "a successful no-output prewarm must count as a hit");
+    assert(result.costUsd === 0.0002, "Sol's 5% cache-read price must be preserved");
+  } finally { warmer.dispose(); }
 }
 
 // 2a) xAI Responses: cap only the legal output field and preserve cache identity.

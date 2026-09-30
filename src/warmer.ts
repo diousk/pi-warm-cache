@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   appendWarmUserTurn,
-  applyWarmOutputLimit,
+  applyWarmProbePayload,
   applyXaiWarmOutputLimit,
   bestEffortFamilyLabel,
   classifyProbeOutcome,
@@ -9,7 +9,6 @@ import {
   CODEX_WARM_OUTPUT_ABORT_TOKENS,
   decideCodexOversizedAction,
   DEFER_BACKOFF_MS,
-  getModelCompat,
   getPromptCacheKey,
   getPromptCacheKeyFingerprint,
   isBestEffortNoWriteFamily,
@@ -2289,7 +2288,8 @@ export class SessionWarmer {
             //    output cap). Exact mode preserves the captured endpoint.
             //    Do NOT append on Anthropic: max_tokens already yields out≈1, and
             //    a second consecutive user role can 400 (roles must alternate).
-            // 3) Apply API-legal output limits only.
+            // 3) Direct OpenAI GPT-5.6+ uses no-output prewarming; other
+            //    routes keep their existing API-legal output controls.
             // Note: complete()'s dummy warmSuffix message is discarded here; the
             // body that wins is this onPayload result (by design).
             const cloned = structuredClone(payload);
@@ -2301,12 +2301,7 @@ export class SessionWarmer {
             probeRequestStartedAt = Date.now();
             return xaiBestEffort
               ? applyXaiWarmOutputLimit(warmPayload, this.config.maxOutputTokens)
-              : applyWarmOutputLimit(
-                  warmPayload,
-                  this.config.maxOutputTokens,
-                  model.api,
-                  getModelCompat(model),
-                );
+              : applyWarmProbePayload(warmPayload, this.config.maxOutputTokens, model);
           },
         },
       );

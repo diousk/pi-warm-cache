@@ -171,6 +171,10 @@ const CLAUDE_MIN_CACHE_TOKENS = new Map([
  * floor. See https://platform.claude.com/docs/en/build-with-claude/prompt-caching.
  */
 export function resolveMinCachedTokens(model: Model<any> | undefined, configuredMin: number): number {
+  // OpenAI's GPT-5.6+ minimum excludes hidden system tokens. Do not schedule
+  // automatic refreshes below the documented cacheable prefix length.
+  if (model?.provider === "openai" && model.api === "openai-responses" &&
+      modelSupportsExplicitPromptCacheMode(model)) return Math.max(configuredMin, 1024);
   if (!model || (!isAnthropicModel(model) &&
       !(model.provider === "claude-bridge" && model.api === "claude-bridge"))) return configuredMin;
   const id = model.id.toLowerCase()
@@ -826,6 +830,35 @@ export function applyWarmOutputLimit<Payload>(
   }
 
   return payload;
+}
+
+/**
+ * Direct OpenAI GPT-5.6+ Responses can refresh the cache without generating
+ * output. Gate on Pi's capability flag and the first-party endpoint, never on
+ * a model-name guess: Codex, Azure, and proxies have not verified this field.
+ * Preserve all cache identity fields, including TTL, mode, breakpoints, effort,
+ * tools, and output settings. Only the probe gets the prewarm flag.
+ */
+export function applyWarmProbePayload<Payload>(
+  payload: Payload,
+  maxOutputTokens: number,
+  model: Model<any>,
+): Payload {
+  const body = payloadObject(payload);
+  let directOpenAi = false;
+  try {
+    const endpoint = new URL(model.baseUrl);
+    directOpenAi = endpoint.protocol === "https:" && endpoint.hostname === "api.openai.com";
+  } catch { /* Invalid endpoints fall back to existing replay controls. */ }
+  if (body && model.provider === "openai" && model.api === "openai-responses" &&
+      directOpenAi && modelSupportsExplicitPromptCacheMode(model)) {
+    body.prompt_cache_options = {
+      ...payloadObject(body.prompt_cache_options),
+      prewarm: true,
+    };
+    return payload;
+  }
+  return applyWarmOutputLimit(payload, maxOutputTokens, model.api, getModelCompat(model));
 }
 
 /**
