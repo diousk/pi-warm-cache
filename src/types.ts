@@ -97,7 +97,11 @@ export type CodexWarmMode = "auto" | "exact" | "suffix";
 /** Built-in command presets or exact Pi tool names allowed during tool runs. */
 export type ToolWarmPreset = string;
 
+export type WarmMode = "off" | "native" | "idle" | "tools" | "both";
+
 export interface WarmCacheConfig {
+  /** Explicit v2 ownership/phase policy; absent only for legacy in-memory callers. */
+  mode?: WarmMode;
   /** Opt-in, version-scoped rpiv-advisor independent request warming. */
   warmAdvisor: boolean;
   /** Master switch. Default true. */
@@ -109,7 +113,7 @@ export interface WarmCacheConfig {
    * - auto: follow Pi cacheRetention / model support
    */
   anthropicTtl: AnthropicTtlMode;
-  /** Keepalive interval in ms. Default 4 minutes; null = strategy default. */
+  /** Keepalive interval in ms. Default null = strategy default; legacy files retain 4 minutes. */
   intervalMs: number | null;
   /** Max sessions that may run concurrent warm pings in this process. */
   maxConcurrentWarmSessions: number;
@@ -169,7 +173,7 @@ export const DEFAULT_CONFIG: WarmCacheConfig = {
   warmAdvisor: false,
   enabled: true,
   anthropicTtl: "auto",
-  intervalMs: 4 * 60_000,
+  intervalMs: null,
   maxConcurrentWarmSessions: 3,
   minCachedTokens: 512,
   maxConsecutiveFailures: 2,

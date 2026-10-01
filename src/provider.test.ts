@@ -4123,10 +4123,11 @@ function deepEqualExcept<Actual, Expected>(
     parseConfigArgs("maxidle=45m").maxIdleWarmMs === 45 * 60_000,
     "maxidle=45m must parse to milliseconds",
   );
-  assert(
-    parseConfigArgs("maxidle=nope").maxIdleWarmMs === null,
-    "an unparseable maxidle token must stay null (formula)",
-  );
+  {
+    let rejected = false;
+    try { parseConfigArgs("maxidle=nope"); } catch { rejected = true; }
+    assert(rejected, "invalid setting must be rejected");
+  }
   assert(
     parseConfigArgs("spend=2.5").warmSpendCeilingUsd === 2.5,
     "spend=2.5 must parse to USD",
@@ -4135,14 +4136,16 @@ function deepEqualExcept<Actual, Expected>(
     parseConfigArgs("spend=0").warmSpendCeilingUsd === 0,
     "spend=0 must parse to the unlimited marker",
   );
-  assert(
-    parseConfigArgs("spend=abc").warmSpendCeilingUsd === null,
-    "a non-numeric spend token must be silently ignored",
-  );
-  assert(
-    parseConfigArgs("spend=-1").warmSpendCeilingUsd === null,
-    "a negative spend token must be silently ignored",
-  );
+  {
+    let rejected = false;
+    try { parseConfigArgs("spend=abc"); } catch { rejected = true; }
+    assert(rejected, "invalid setting must be rejected");
+  }
+  {
+    let rejected = false;
+    try { parseConfigArgs("spend=-1"); } catch { rejected = true; }
+    assert(rejected, "invalid setting must be rejected");
+  }
 
   // isBestEffortNoWriteFamily truth table.
   assert(isBestEffortNoWriteFamily("xai-best-effort"), "xAI best-effort is a no-write family");
@@ -5737,8 +5740,11 @@ for (const tool of [
   const generating = await runTimerWarm(warmer);
   assert(!generating.ok && calls === 0, "all-tools cannot warm during generation without tools");
   warmer.onAssistantMessageEnd(ctx);
+  warmer.setConfig(parseConfigArgs("mode=idle", warmer.getConfig()));
   warmer.onToolExecutionStart({toolCallId: "browser", toolName: "browser", args: {}}, ctx);
   warmer.onToolExecutionStart({toolCallId: "shell", toolName: "bash", args: {command: "npm test | tee log"}}, ctx);
+  assert(!(await runTimerWarm(warmer)).ok && calls === 0, "idle-only mode cannot warm during tools");
+  warmer.setConfig(parseConfigArgs("mode=tools", warmer.getConfig()));
   assert((await runTimerWarm(warmer)).ok, "all-tools must allow mixed parallel tools and arbitrary commands");
   assert(Number(calls) === 1 && warmer.getStatusText().includes("toolWarm=all"), "all-tools must be visible in status");
   assert(!(await runTimerWarm(warmer)).ok && Number(calls) === 1, "all-tools must enforce probe cap");
@@ -5826,7 +5832,7 @@ for (const tool of [
   notices.length = 0;
   await handler("config", ctx);
   const currentConfig = notices.at(-1)!;
-  assert(currentConfig.includes('"enabled": false') && currentConfig.includes('"warmAllTools": true') && currentConfig.includes('"toolWarmMaxProbes": 4'), "config must reflect live overrides");
+  assert(currentConfig.includes('"mode": "off"') && currentConfig.includes('"tools": "all"') && currentConfig.includes('"toolWarmMaxProbes": 4'), "config must reflect live overrides");
   assert(currentConfig.includes("warm-cache.json"), "config must show the file path");
   await handler("status", ctx);
   const stat = notices.at(-1)!;
@@ -5843,6 +5849,14 @@ for (const tool of [
   assert(savedConfigs.length === 2, "read-only commands must not save settings");
   await handler("unknown-option", ctx);
   assert(savedConfigs.length === 2, "unknown options must not overwrite saved settings");
+  for (const args of ["on interval=1ms", "spend=typo", "mode=wrong", "tools=all,gradle"]) {
+    await handler(args, ctx);
+    await handler("config", ctx);
+    assert(notices.at(-1) === currentConfig && savedConfigs.length === 2, "invalid settings must leave live and saved state unchanged");
+  }
+  await handler("mode=idle scope=session", ctx);
+  await handler("config", ctx);
+  assert(notices.at(-1)!.includes('"mode": "idle"') && savedConfigs.length === 2, "session-only mode must not persist");
 }
 
 // /warm model= uses the current selectable model scope and adds entries one at a time.
@@ -6151,7 +6165,7 @@ for (const tool of [
 
 {
   const summary = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 240_000 }, "openai-codex-responses");
-  assert(summary === "interval=4m · codex replay=auto · concurrency=3 (warming requests per Pi process) · debug log=off", "Codex settings must use readable units and explain the replay policy");
+  assert(summary === "mode=both · interval=4m · codex replay=auto · concurrency=3 (warming requests per Pi process) · debug log=off", "Codex settings must use readable units and explain the replay policy");
   assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 90_000 }).includes("interval=1m 30s"), "settings must avoid decimal minutes");
   assert(formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: 15_000 }).includes("interval=15s"), "settings must support seconds");
   const anthropic = formatWarmSettings({ ...DEFAULT_CONFIG, intervalMs: null, logToFile: true }, "anthropic-messages");

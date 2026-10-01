@@ -16,7 +16,7 @@
 
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadConfigJson, normalizeWarmModelId, parseConfigArgs, saveConfigJson, warmCacheConfigPath } from "./config.ts";
+import { loadConfigJson, normalizeWarmModelId, parseConfigArgs, saveConfigArgs, configDocument, effectiveMode, withMode, formatDurationShort, warmCacheConfigPath } from "./config.ts";
 import type { WarmCacheConfig } from "./types.ts";
 import { DEFAULT_CONFIG } from "./types.ts";
 import { SessionWarmer } from "./warmer.ts";
@@ -63,6 +63,7 @@ export function formatWarmSettings(config: WarmCacheConfig, api?: string): strin
     : seconds < 60 ? `${seconds}s`
     : `${Math.floor(seconds / 60)}m${seconds % 60 ? ` ${seconds % 60}s` : ""}`;
   return [
+    `mode=${effectiveMode(config)}`,
     `interval=${interval}`,
     ...(api === "anthropic-messages" ? [`Anthropic TTL=${config.anthropicTtl}`] : []),
     ...(api === "openai-codex-responses" ? [`codex replay=${config.codexWarmMode ?? "auto"}`] : []),
@@ -96,7 +97,7 @@ function selectableWarmModels(ctx: ExtensionContext): Model<any>[] {
   }
 }
 
-export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmCacheConfig) => void = saveConfigJson) {
+export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: WarmCacheConfig) => void) {
   const bridge = new ClaudeBridgeTransport(pi);
   const warmer = new SessionWarmer(pi, undefined, { transport: bridge });
   bridge.bind(warmer);
@@ -110,6 +111,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
     availableWarmModels = selectableWarmModels(ctx);
   };
   let lastCapabilityNoticeKey: string | null = null;
+  let configSource = "defaults";
 
   // Optional CLI: pi --warm-cache / pi --warm-cache=off
   pi.registerFlag("warm-cache", {
@@ -126,6 +128,11 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
     const loaded = loadConfigJson();
     config = loaded.config;
+    configSource = "saved settings + defaults";
+    if (loaded.migration) {
+      if (ctx.hasUI) ctx.ui.notify(loaded.migration, "info");
+      else process.stderr.write(`${loaded.migration}\n`);
+    }
     if (loaded.error) {
       if (ctx.hasUI) ctx.ui.notify(`pi-warm-cache disabled: ${loaded.error}`, "warning");
       else process.stderr.write(`pi-warm-cache disabled: ${loaded.error}\n`);
@@ -135,17 +142,26 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
     const envDebug = process.env.PI_WARM_CACHE_DEBUG;
     if (envDebug === "1" || envDebug === "true" || envDebug === "on") {
       config = { ...config, logToFile: true };
+      configSource += " + environment override";
     }
 
     const flag = pi.getFlag("warm-cache");
     if (!loaded.error && Object.prototype.toString.call(flag) === "[object String]") {
       const value = String(flag);
+      if (value) configSource += " + CLI override";
+      try {
       if (value === "false" || value === "0" || value === "off") {
-        config = { ...config, enabled: false };
+        config = withMode(config, "off");
       } else if (value === "true" || value === "1" || value === "on") {
-        config = { ...config, enabled: true };
+        config = withMode(config, "both");
       } else {
         config = parseConfigArgs(value, config);
+      }
+      } catch (error) {
+        config = withMode(config, "off");
+        const message = `Invalid --warm-cache: ${error instanceof Error ? error.message : String(error)}. Warming stopped.`;
+        if (ctx.hasUI) ctx.ui.notify(message, "warning");
+        else process.stderr.write(`${message}\n`);
       }
     }
 
@@ -259,8 +275,14 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       const options = [
         ["status", "Show warming status and statistics"],
         ["config", "Show current settings"],
-        ["on", "Enable automatic warming"],
-        ["off", "Disable automatic warming"],
+        ["mode=both", "Warm while idle and during eligible tools"],
+        ["mode=idle", "Warm only while idle"],
+        ["mode=tools", "Warm only during eligible tools"],
+        ["mode=off", "Stop extension and native session warming"],
+        ["mode=native", "Delegate to Pi (no native warmer on 0.85.1)"],
+        ["scope=session", "Apply this command only to the current session"],
+        ["on", "Enable idle and tool warming"],
+        ["off", "Stop extension and native session warming"],
         ["now", "Refresh cache once"],
         ["resume", "Clear the automatic warming block"],
         ["tools=gradle", "Warm during long Gradle builds"],
@@ -270,15 +292,16 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         ["model=all", "Warm every selectable model (default)"],
         ["toolmin=3m", "Wait 3 minutes before warming during tools"],
         ["toolmax=6", "Allow up to 6 refreshes per tool batch"],
+        ["interval=auto", "Use the provider refresh interval (default)"],
         ["interval=4m", "Set refresh interval (editable duration)"],
         ["maxidle=30m", "Stop after 30 minutes without a real turn"],
+        ["spend=unlimited", "Remove the warming spend ceiling"],
+        ["maxidle=unlimited", "Remove the idle time limit"],
         ["spend=1", "Set warming spend ceiling to $1"],
         ["max=3", "Allow 3 concurrent warming sessions"],
         ["advisor=on", "Enable independent rpiv-advisor warming (experimental)"],
         ["advisor=off", "Disable independent advisor warming"],
-        ["auto", "Follow the provider's cache retention"],
-        ["5m", "Use short Anthropic cadence"],
-        ["1h", "Follow existing 1-hour Anthropic retention"],
+        ["auto", "Reset to the provider refresh interval"],
         ["codex-on", "Enable Codex automatic warming"],
         ["codex-off", "Disable Codex automatic warming"],
         ["codex=auto", "Detect and avoid Codex suffix branch misses"],
@@ -333,15 +356,23 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       return items.length > 0 ? items : null;
     },
     description:
-      "Control prompt-cache warming. Usage: /warm [on|off|config|status|savings|now|resume|codex-on|codex-off|codex=auto|codex=exact|codex=suffix|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|model=all|model=<provider>/<model-id>|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
+      "Control prompt-cache warming. Usage: /warm [mode=both|mode=idle|mode=tools|mode=off|mode=native|scope=session|interval=auto|on|off|config|status|savings|now|resume|codex-on|codex-off|codex=auto|codex=exact|codex=suffix|5m|1h|auto|log|nolog|interval=4m|max=3|tools=gradle|tools=<tool-name>|tools=all|tools=off|model=all|model=<provider>/<model-id>|toolmin=3m|toolmax=6|advisor=on|advisor=off]",
     handler: async (args, ctx) => {
       refreshAvailableWarmModels(ctx);
       const trimmed = args.trim();
       if (trimmed.toLowerCase() === "config") {
+        const current = warmer.getConfig();
+        const idle = current.maxIdleWarmMs === null ? "auto (provider policy)" : current.maxIdleWarmMs === 0 ? "unlimited" : formatDurationShort(current.maxIdleWarmMs);
+        const spend = current.warmSpendCeilingUsd === null ? "auto ($1 on OpenCode Go; unlimited elsewhere)" : current.warmSpendCeilingUsd === 0 ? "unlimited" : `$${current.warmSpendCeilingUsd}`;
         ctx.ui.notify(
           `Effective runtime configuration (not just file contents)\nConfig file: ${warmCacheConfigPath()}\n` +
-          `${JSON.stringify(warmer.getConfig(), null, 2)}\n` +
-          "Durations are milliseconds. null uses provider/default policy; see /warm status for resolved status.",
+          `Source: ${configSource}\n${formatWarmSettings(current, ctx.model?.api)}\n` +
+          `${nativeWarming.status(warmer.ownsAutomaticWarming(ctx))}\n` +
+          `Tools: ${current.warmAllTools ? "all" : current.warmDuringTools.join(", ") || "none"}; minimum runtime: ${formatDurationShort(current.toolWarmMinRuntimeMs)}\n` +
+          `Idle limit: ${idle}\nSpend ceiling: ${spend} per provider per warming campaign (per process, not an account budget)\n` +
+          `Display: ${current.showWidget ? "widget above input" : "hidden"}\n` +
+          `${JSON.stringify(configDocument(current), null, 2)}\n` +
+          `Resolved strategy and pause reason:\n${warmer.getStatusText()}`,
           "info",
         );
         return;
@@ -453,21 +484,17 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
       }
 
       const lower = trimmed.toLowerCase();
-      const knownTokens = /^(?:on|enable|enabled|off|disable|disabled|5m|short|1h|long|auto|widget|nowidget|hide|log|debug|nolog|nodebug|codex-on|codexon|codex-off|codexoff|resume|advisor=(?:on|off)|codex(?:mode|warm)?=(?:auto|exact|suffix)|(?:interval|intervalms|maxidle|spend|max|maxconcurrent|mincached|mintokens|tools|tool|model|models|toolmin|toolmax|ttl|log|debug)=.+)$/;
-      const unknown = lower.split(/\s+/).find((token) => !knownTokens.test(token));
-      if (unknown) {
-        ctx.ui.notify(`Unknown option: ${unknown}. Type /warm followed by a space to see available options.`, "warning");
+      let candidate: WarmCacheConfig;
+      try { candidate = parseConfigArgs(trimmed, warmer.getConfig()); }
+      catch (error) {
+        ctx.ui.notify(`Invalid settings: ${error instanceof Error ? error.message : String(error)}. Nothing changed.`, "warning");
         return;
       }
+      const sessionOnly = lower.split(/\s+/).filter(token => token.startsWith("scope=")).at(-1) === "scope=session";
       const persistConfig = () => {
         advisorWarmer.configure(config, ctx);
         if (config.warmAdvisor) ctx.ui.notify(advisorWarmer.status(), "info");
-        try {
-          saveConfig(config);
-          ctx.ui.notify(`Settings saved to ${warmCacheConfigPath()}`, "info");
-        } catch (error) {
-          ctx.ui.notify(`Settings apply to this session only; could not save ${warmCacheConfigPath()}: ${error instanceof Error ? error.message : String(error)}`, "warning");
-        }
+        ctx.ui.notify(sessionOnly ? "Settings apply to this session only." : `Settings saved to ${warmCacheConfigPath()}; other running sessions keep their runtime settings until reload.`, "info");
       };
       const resumeRequested =
         lower === "resume" ||
@@ -486,8 +513,23 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         return;
       }
 
+      // Validate and persist before touching live schedulers. Replay the command
+      // against the latest disk state; unrelated session/CLI overrides stay local.
+      try {
+        if (!sessionOnly) {
+          if (saveConfig) saveConfig(candidate);
+          else saveConfigArgs(trimmed);
+        }
+      } catch (error) {
+        ctx.ui.notify(`Settings unchanged: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        return;
+      }
+      configSource = sessionOnly ? "runtime settings + session override (not saved)" : "runtime settings; last command saved (other overrides remain local)";
+      if (/(?:^|\s)(?:5m|short|1h|long|ttl=\S+)(?:\s|$)/.test(lower)) {
+        ctx.ui.notify("Legacy TTL preference retained; it does not change provider cache retention. Use interval=auto for provider cadence.", "info");
+      }
       if (lower === "codex-on" || lower === "codex-off") {
-        config = parseConfigArgs(trimmed, warmer.getConfig());
+        config = candidate;
         bridge.configure(ctx, config);
         warmer.bindContext(ctx);
         if (lower === "codex-on") {
@@ -505,7 +547,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
         return;
       }
 
-      config = parseConfigArgs(trimmed, warmer.getConfig());
+      config = candidate;
       bridge.configure(ctx, config);
       warmer.bindContext(ctx);
       if (resumeRequested && config.enabled) {
@@ -516,7 +558,9 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig: (config: WarmC
 
       if (!config.enabled) {
         clearWarmUi(ctx);
-        ctx.ui.notify("pi-warm-cache disabled. On Pi 0.86+, native warming still follows Pi's cacheWarming setting.", "info");
+        ctx.ui.notify(effectiveMode(config) === "native"
+          ? "Extension warming disabled; native Pi policy owns warming on 0.86+ (unavailable on 0.85.1)."
+          : "Warming off: extension and native session warming stopped while this extension is loaded.", "info");
         return;
       }
 

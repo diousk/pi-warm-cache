@@ -75,12 +75,17 @@ try {
   await emit("turn_start");
   await emit("before_provider_request", { payload: { ...payload, messages: [{ role: "user", content: "next real turn" }] } });
   assert.notEqual(await status(), before, "next real turn must be captured");
+  await command.handler("mode=tools", ctx);
+  await emit("agent_settled");
+  assert((await status()).includes("nextDue=none"), "tools-only mode must not schedule while idle");
   await command.handler("off", ctx);
+  assert.deepEqual(await emit("cache_warming_decision", decision), { action: "stop" }, "off must veto native warming too");
+  await command.handler("mode=native", ctx);
   assert.equal(await emit("cache_warming_decision", decision), undefined);
   assert((await status()).includes("Pi policy"));
   await command.handler("on", ctx);
   ctx.model = { ...model, provider: "custom", baseUrl: "https://unsupported.invalid" };
-  assert.equal(await emit("cache_warming_decision", decision), undefined, "unsupported routes delegate to Pi");
+  assert.deepEqual(await emit("cache_warming_decision", decision), { action: "stop" }, "explicit extension mode prevents a second scheduler even on unsupported routes");
   ctx.model = model;
   await command.handler("on tools=off spend=0.01", ctx);
   assert.deepEqual(await emit("cache_warming_decision", decision), { action: "stop" }, "policy pauses must retain ownership");
@@ -149,7 +154,12 @@ try {
         assert.equal(nativeCalls, 0, `${phase}: native provider call must be vetoed before dispatch`);
         assert.equal(native.status.reason, "stopped by extension");
       }
-      await command.handler("off", ctx);
+      await command.handler("mode=off", ctx);
+      native.start({ model, context: legacy, options: {} }, () => true);
+      mock.timers.tick(10000);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(nativeCalls, 0, "mode=off must stop the actual native warmer");
+      await command.handler("mode=native", ctx);
       const disabledStatus = await status();
       native.start({ model, context: legacy, options: {} }, () => true);
       mock.timers.tick(10000);

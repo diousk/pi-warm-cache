@@ -231,7 +231,7 @@ try {
       warmer.onAssistantMessageEnd(ctx);
       warmer.noteAssistantUsage(ctx, { cacheRead: 8192 });
       warmer.onAgentSettled(ctx);
-      assert.equal(nextDue(warmer), start + 7 * 60_000, "other providers retain their existing cadence");
+      assert.equal(nextDue(warmer), start + 3 * 60_000 + Math.floor(8 * 60_000 * 0.8), "other providers use automatic cadence measured from completion");
     } finally { warmer.dispose(); }
   }
 

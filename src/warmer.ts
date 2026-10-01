@@ -1,3 +1,4 @@
+import { effectiveMode } from "./config.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   appendWarmUserTurn,
@@ -326,6 +327,7 @@ export class SessionWarmer {
 
   /** Keep route ownership even when spend, failure, or tool policy pauses probes. */
   ownsAutomaticWarming(ctx: ExtensionContext): boolean {
+    if (this.config.mode !== undefined) return effectiveMode(this.config) !== "native";
     if (!this.config.enabled) return false;
     // Keep the extension as the native-warming owner for explicitly excluded
     // models too; otherwise Pi's native policy could bypass the user's filter.
@@ -430,6 +432,7 @@ export class SessionWarmer {
   }
 
   setConfig(config: WarmCacheConfig): void {
+    if (effectiveMode(config) !== effectiveMode(this.config)) this.abort?.abort();
     this.config = {
       ...config,
       warmDuringTools: [...config.warmDuringTools],
@@ -1293,6 +1296,8 @@ export class SessionWarmer {
   }
 
   private toolWarmStandbyReason(): string | null {
+    if (effectiveMode(this.config) === "idle") return "Idle-only mode";
+    if (!this.config.enabled) return "Warming disabled";
     if (this.runningTools.size === 0 || this.providerRequestInFlight) return "Agent working";
     if (!this.config.warmAllTools && this.config.warmDuringTools.length === 0) return "Tool warming off";
     if (this.toolWarmProbeCount >= this.config.toolWarmMaxProbes) return "Tool refresh limit reached";
@@ -1341,6 +1346,11 @@ export class SessionWarmer {
       return;
     }
     const agentIdle = ctx.isIdle();
+    if (agentIdle && effectiveMode(this.config) === "tools") {
+      this.clearTimers();
+      this.showIdle(ctx, "tools-only mode", "Waiting for an eligible running tool");
+      return;
+    }
     const toolWarmAllowed = this.canWarmDuringTool();
     if (!agentIdle && !toolWarmAllowed) {
       this.clearTimers();
@@ -2115,6 +2125,9 @@ export class SessionWarmer {
       }
     }
 
+    if (reason === "timer" && (!this.config.enabled || (ctx.isIdle() && effectiveMode(this.config) === "tools"))) {
+      return buildWarmResult({ fingerprint: anchor.payloadFingerprint, error: "warming mode does not allow this phase", unavailable: true, anchor });
+    }
     const inToolWarmWindow = reason === "timer" && this.canWarmDuringTool();
     if (!ctx.isIdle() && reason === "timer" && !inToolWarmWindow) {
       const deferral = this.deferProbe("agent busy", reason);
