@@ -8,7 +8,7 @@ The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
 The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
-CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, 0.99.1, and the latest
+CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, 0.99.1, 0.99.2, and the latest
 stable release on each push to main and pull request. The latest job resolves one
 version for all three Pi packages. Development dependencies remain pinned to
 0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
@@ -16,17 +16,19 @@ releases are considered validated only after their compatibility checks pass.
 
 ### Pi 0.86 native cache warming
 
-When this extension is enabled on a verified route, it owns automatic warming
-and returns `stop` from Pi's `cache_warming_decision` event. Ownership remains
-with the extension when its spend, failure, tool, or retention policy pauses
-probes, so native warming cannot bypass those limits. Pi 0.85.1 stores the
-event handler without emitting it; its scheduling behavior is unchanged.
+Version 0.2.6 uses an explicit `mode` to choose one owner for main-session
+warming. `idle`, `tools`, and `both` let this extension manage scheduling;
+`off` stops both extension and native session warming while the extension is
+loaded. These modes veto native warming even on unsupported routes, or while
+extension limits pause probes. Use `mode=native` to delegate to Pi's
+`cacheWarming` setting. On Pi 0.85.1 that mode has no native warmer to invoke.
+`/warm status` shows ownership, which does not imply a scheduled probe.
+Unloading the extension restores Pi's own policy; no Pi settings are modified.
 
-When the extension is disabled or the route is not verified, Pi 0.86 may warm
-according to its own `cacheWarming` setting. `/warm off` only disables this
-extension. To disable both warmers, also set `"cacheWarming": "off"` in Pi's
-global settings. This extension never changes that setting. `/warm status`
-shows who owns warming; ownership does not mean a probe is currently scheduled.
+Legacy JSON with `enabled: false` migrates to `mode: "native"`, preserving its
+old native-delegation behavior. A migration notice explains that the new
+`/warm off` alias now means `mode=off`. An already-dispatched native request
+cannot be cancelled by the decision hook; the veto applies to future decisions.
 
 Native warming reuses the provider-request hook without starting an agent turn.
 The extension fences requests following a native decision until the next real
@@ -76,8 +78,16 @@ can be edited before submitting.
 /warm config           # show effective runtime configuration and JSON file path
 /warm status           # show warm statistics and status
 /warm savings          # show only the savings summary
-/warm on               # enable warming
-/warm off              # disable warming
+/warm mode=both        # warm while idle and during eligible tools (default)
+/warm mode=idle        # warm only while idle
+/warm mode=tools       # warm only during eligible tools
+/warm mode=off         # stop extension and native session warming
+/warm mode=native      # delegate to Pi native policy (0.86+)
+/warm on               # alias for mode=both
+/warm off              # alias for mode=off
+/warm interval=auto    # follow the provider refresh cadence
+/warm spend=2 maxidle=30m
+/warm mode=idle scope=session # temporary override; no file write
 /warm now              # send one probe when the current route allows it
 /warm resume           # clear a sticky automatic-warm block
 /warm codex-on         # enable Codex timer warming
@@ -85,9 +95,7 @@ can be edited before submitting.
 /warm codex=auto       # adapt after a suffix branch miss (default)
 /warm codex=exact      # replay Codex exactly (output is not hard-capped)
 /warm codex=suffix     # keep the bounded OK-suffix replay
-/warm 5m               # Anthropic short cadence
-/warm 1h               # Anthropic long cadence when the request already uses it
-/warm auto             # follow the provider strategy
+/warm auto             # alias for interval=auto
 /warm log              # write a local diagnostic log
 /warm nolog            # stop the diagnostic log
 /warm interval=3.5m max=2 maxidle=2h spend=2.5
@@ -99,7 +107,7 @@ You can also set this when Pi starts:
 ```bash
 pi --warm-cache
 pi --warm-cache=off
-pi --warm-cache="1h interval=45m"
+pi --warm-cache="mode=both interval=auto"
 ```
 
 ## What stays warm
@@ -163,11 +171,13 @@ off, as do Copilot-compatible custom endpoints. Available Copilot models still
 depend on the user's Copilot plan and model policy. `/warm codex-on` applies
 only to the separate OpenAI Codex provider; it does not control Copilot timers.
 
-The built-in interval is **4 minutes** for eligible automatic warming routes.
-Saved custom intervals are preserved. Set `intervalMs` to `null` in the JSON
-configuration to use provider-specific automatic intervals instead. The TTL-based
-intervals described below apply in that automatic mode; retention and safety
-gates still take precedence over an interval setting.
+New installations default to **`interval=auto`**: the captured provider route
+selects the cadence (for example 4 minutes for short Anthropic caches, 48
+minutes for a captured one-hour cache, or 24 minutes for supported direct
+OpenAI prewarm). Explicit intervals override the cadence, but never override
+retention or safety gates. This setting does not change the cache TTL itself.
+Legacy JSON retains its saved interval, or its previous 4-minute default when
+omitted. Use `/warm auto` to deliberately switch it to automatic cadence.
 
 Copilot Responses/Completions use a **best-effort 4-minute probe interval** by
 default (an explicit `intervalMs` overrides it). This is not a guaranteed TTL,
@@ -329,75 +339,93 @@ and the feature consumes additional model usage. Do not add API-only
 `prompt_cache_options` or `prompt_cache_breakpoint` fields to this Codex route:
 the tested endpoint rejects them.
 
-Create `~/.pi/agent/warm-cache.json` to persist your preferred defaults:
+Create `~/.pi/agent/warm-cache.json` with the v2 format, or use `/warm` commands:
 
 ```json
 {
-  "enabled": false,
+  "schemaVersion": 2,
+  "mode": "both",
+  "tools": "all",
+  "interval": "auto",
+  "maxIdle": "30m",
+  "spend": 2,
+  "showWidget": true,
   "warmAdvisor": false,
-  "codexWarmMode": "auto",
   "warmModels": [],
-  "warmDuringTools": ["gradle"],
-  "warmAllTools": false,
   "toolWarmMinRuntimeMs": 180000,
-  "toolWarmMaxProbes": 6,
-  "maxConsecutiveFailures": 2,
-  "intervalMs": 240000,
-  "maxIdleWarmMs": 1800000
+  "toolWarmMaxProbes": 6
 }
 ```
 
-Then use `/warm on` to enable warming with these settings and `/warm off`
-to disable it. Settings commands preserve your tool policy and automatically
-save the complete effective configuration to this file, including current CLI
-and environment overrides. New sessions and subagents that load this extension
-use the saved defaults; already-running sessions keep their current settings.
+`mode` selects **when** to warm; `tools` selects eligible tool names (`"all"`
+or an array such as `["gradle", "bash"]`). No second tool boolean is needed.
+`interval` accepts `"auto"` or a duration such as `"4m"`. `maxIdle` accepts
+`"auto"`, a duration, or `"unlimited"`. `spend` accepts `"auto"`, a nonnegative
+USD number, or `"unlimited"`. Auto spend means $1 on OpenCode Go and no ceiling
+elsewhere. Limits are per provider per warming campaign within one process,
+not an account-wide budget. Legacy command `spend=0` / `maxidle=0` aliases
+remain accepted for unlimited; prefer the explicit word.
 
-The file is read on `session_start` (including extension reload). Restart or
-reload Pi after editing it. Precedence: built-in defaults, JSON, environment
-debug flag, explicit `--warm-cache` tokens, then runtime `/warm` commands.
-An absent file retains built-in behavior; an invalid/unreadable file disables
-automatic warming and reports an error. Correct it and reload Pi.
-Settings commands create the file if needed and replace it atomically. A save
-failure reports a warning and keeps the change active for the current session.
-Status/config/savings queries, `/warm now`, and `/warm resume` do not write the file.
+Commands validate the entire change before applying it. By default they save
+only the requested settings, merging against the latest disk file under an
+exclusive lock and atomically replacing it. Unrelated CLI, environment and
+session overrides are not saved. Use `scope=session` to apply without saving.
+A validation or save failure leaves live settings unchanged. A busy lock is
+reported for retry; after a crashed writer, remove its stale `.lock` file only
+when no writer is active. Other running sessions keep their runtime settings
+until reload. No provider requests are needed to change configuration.
+
+Precedence: defaults, saved JSON, environment debug flag, CLI, then runtime
+commands. The file is loaded on session start/reload. Invalid JSON stops
+extension and native session warming until corrected and reloaded. Read-only
+commands, `/warm now`, and standalone `/warm resume` do not save settings.
+
+Legacy JSON remains readable. Migration preserves limits, model filters and
+saved intervals; omitted legacy intervals retain 4 minutes. An explicit old
+tool allowlist without `warmAllTools` now restricts tools, with a migration
+notice. Explicit `warmAllTools: true` remains all-tools. Legacy disabled state
+becomes `mode=native`; the next saved command writes v2. Do not mix legacy
+keys (`enabled`, `warmAllTools`, `warmDuringTools`, `intervalMs`,
+`maxIdleWarmMs`, `warmSpendCeilingUsd`) into a v2 document. Older extension
+versions cannot read v2; keep a copy of your legacy file before downgrading.
 
 Automatic warming stops after two consecutive probe failures by default. A new
 real turn resets the failure streak; set `maxConsecutiveFailures` in the JSON
 configuration to change this retry budget.
 
-JSON keys use the `WarmCacheConfig` field names in `src/types.ts`, not the
-command aliases below. Durations are numbers in milliseconds; unknown fields,
-invalid types and unsupported tool presets are rejected.
+Other advanced keys retain their names from `WarmCacheConfig` in
+`src/types.ts`. Unknown keys and invalid values are rejected. The old `5m`,
+`1h`, and `ttl=` commands are deprecated preferences, not cache-TTL controls;
+they remain accepted with a notice. Set Pi/provider retention on real requests
+and use `interval=auto` for the corresponding refresh cadence.
 
 Useful tokens for `/warm` and `--warm-cache`:
 
 | Token | Meaning | Default |
 |---|---|---|
-| `on` / `off` | Master switch | on |
-| `5m` / `1h` / `auto` | Anthropic cadence | auto |
-| `interval=` | Override probe delay | 4 minutes |
+| `mode=both\|idle\|tools\|off\|native` | Phase and ownership policy | both |
+| `on` / `off` | Aliases for mode=both / mode=off | both |
+| `auto` / `interval=auto` | Provider refresh cadence | auto |
+| `interval=4m` | Explicit refresh interval | unset |
+| `scope=session` | Do not save this command | saved |
 | `codex=auto\|exact\|suffix` | Codex replay policy: adapt, exact endpoint replay, or legacy bounded suffix | `auto` |
 | `max=` | Max concurrent warm sessions | 3 |
-| `maxidle=` | Stop after this idle time; `0` means no cutoff | about 30 minutes, or longer for 1-hour families |
-| `spend=` | Probe-spend ceiling in USD; `0` means unlimited | $1.00 on OpenCode Go only |
+| `maxidle=` | Stop after this idle time; `unlimited` removes the cutoff | about 30 minutes, or longer for 1-hour families |
+| `spend=` | Probe-spend ceiling in USD; `unlimited` removes the ceiling | $1.00 on OpenCode Go only |
 | `model=` | Restrict warming to one or more selectable `provider/model-id` values; `model=all` resets | all models |
 | `log` / `nolog` | Local JSONL log | off |
 | `tools=` | Tool policy: `all`, an exact tool name, `gradle`, or `off` | all |
-| `tools=all` | Allow all tool names and commands (`warmAllTools: true` in JSON) | on |
+| `tools=all` | All tool names and commands (`"tools": "all"` in v2 JSON) | all |
 | `toolmin=` | Minimum matching-tool runtime before warming | 3 minutes |
 | `toolmax=` | Maximum probes per uninterrupted tool batch | 6 |
 | `advisor=on` / `advisor=off` | Warm the independent `@juicesharp/rpiv-advisor` tool (experimental) | off |
 
-Warming during **all tools** is enabled by default (`"warmAllTools": true`).
-An existing saved `"warmAllTools": false` remains respected; use `/warm tools=all`
-to enable and save the new policy in an existing installation.
-This overrides the `warmDuringTools` allowlist, including for parallel tools.
-Use `/warm on` and `/warm off` as usual; the policy is preserved.
-Use `/warm tools=all`; `/warm tools=gradle`; or
-`/warm tools=ask_user_question` to select the matching policy. `/warm tools=off`
-disables tool warming but leaves idle warming enabled if the master switch is on.
-All-tools mode does not itself enable the master switch.
+`mode=both` and `mode=tools` allow tool warming; `tools=all` is the default
+selector. Use `/warm tools=gradle` or `/warm tools=ask_user_question` to restrict
+it. The legacy `/warm tools=off` alias clears the selector (no eligible tools)
+but does not change the mode or idle policy. Selecting tools never enables a
+disabled mode. Independent advisor warming is still opt-in; its completed
+requests use the idle phase, so tools-only mode does not schedule advisor probes.
 
 Model warming includes all models by default (`"warmModels": []`). Type
 `/warm model=` to browse models selectable in the current Pi session; choices
@@ -420,9 +448,9 @@ the parent extension cannot observe. Use `/warm tools=gradle` to narrow the poli
 or `/warm tools=off` to disable tool warming. The extension never executes tool
 calls returned by a warm probe.
 
-`warmDuringTools` also accepts exact Pi tool names, such as
-`"ask_user_question"`. Exact names are matched case-insensitively. When
-`warmAllTools` is `false`, only the configured names and presets are eligible.
+The v2 `tools` array accepts exact Pi tool names such as
+`"ask_user_question"`. Exact names are matched case-insensitively; only selected
+names and presets are eligible unless `tools` is `"all"`.
 The Gradle shell preset accepts a single `gradle`, `gradlew`, or `./gradlew`
 command with plain arguments, optionally prefixed by `cd android &&` (or
 another literal directory). Quoted arguments, substitutions, pipelines,
@@ -442,8 +470,8 @@ This extension does not add 1-hour markers to your real turns.
 
 `/warm config` shows the current effective settings, including startup JSON,
 CLI and runtime overrides, not a fresh read of the config file. It also shows
-the config file path. `null` values mean provider/default policy rather than
-a resolved interval; use `/warm status` to inspect the resolved strategy.
+the config file path, mode, source summary, readable limits, v2 JSON and the
+resolved strategy/pause reason. Saved settings can differ from running overrides.
 
 `/warm status` and bare `/warm` are read-only equivalents:
 they report lifecycle, route, tool policy, next probe, hits/misses, probe cost,
