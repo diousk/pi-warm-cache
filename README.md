@@ -316,9 +316,12 @@ the bounded `OK` suffix because the Codex route has no hard output-token cap. If
 the provider reports a hit for that suffix but the next comparable real turn has
 no cache read, the extension records the branch as unsafe and uses exact replay
 for subsequent probes. Set `/warm codex=exact` to force exact replay from the
-first probe, or `/warm codex=suffix` to retain the legacy behavior. Exact replay
-can produce a larger completion and may consume more tokens; the existing
-oversized-output guard can block automatic warming after repeated spikes.
+first probe, or `/warm codex=suffix` to retain suffix replay. If an adaptive
+exact probe returns 256 or more output tokens, warming falls back to suffix and
+does not automatically promote to exact again for the rest of that Pi session.
+The `/warm status` output shows `exactFallback=paused`. Repeated oversized
+responses still block automatic warming to protect against excess token use;
+explicit `/warm codex=exact` keeps the existing two-spike safeguard.
 
 The rpiv-advisor idle cutoff is measured from its own captured request, not
 executor activity. Its timer is independent of the main agent's tool-batch probe

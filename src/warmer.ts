@@ -284,6 +284,8 @@ export class SessionWarmer {
   private spendBlockReason: string | null = null;
   /** Consecutive Codex warm ticks with out >= CODEX_WARM_OUTPUT_ABORT_TOKENS. */
   private consecutiveCodexOversized = 0;
+  /** Session in which adaptive exact replay was demoted after an oversized response. */
+  private codexExactReplaySuppressedSessionId: string | null = null;
   /** Last scheduled probe deferral, retained until a probe gets a slot. */
   private deferredProbe: WarmDeferralState | null = null;
   /** Monotonic fence for payload/model/branch/compaction changes. */
@@ -423,6 +425,7 @@ export class SessionWarmer {
     if (model?.api !== "openai-codex-responses") return undefined;
     if (this.options.exactCodexReplay || this.config.codexWarmMode === "exact") return "exact";
     if (this.config.codexWarmMode === "suffix") return "suffix";
+    if (this.codexExactReplaySuppressedSessionId === this.ctx?.sessionManager.getSessionId()) return "suffix";
     if (preservePrevious && previous?.codexReplayMode === "exact") return "exact";
     return "suffix";
   }
@@ -628,6 +631,10 @@ export class SessionWarmer {
 
     this.anchorRevision += 1;
     this.ctx = ctx;
+    const sessionId = ctx.sessionManager.getSessionId();
+    if (this.codexExactReplaySuppressedSessionId !== null && this.codexExactReplaySuppressedSessionId !== sessionId) {
+      this.codexExactReplaySuppressedSessionId = null;
+    }
     this.logFile = warmLogPath(ctx.cwd);
     this.deferredProbe = null;
     if (this.runningTools.size > 0) this.clearTimers();
@@ -760,7 +767,6 @@ export class SessionWarmer {
       }
     }
 
-    const sessionId = ctx.sessionManager.getSessionId();
     const pricing = resolveModelPricing(model);
     // Savings are claimed only when the resolved plan actually runs a
     // keepalive timer. The capability alone is not enough: a verified
@@ -968,6 +974,7 @@ export class SessionWarmer {
       this.anchor.modelApi === "openai-codex-responses" &&
       this.config.codexWarmMode === "auto" &&
       !this.options.exactCodexReplay &&
+      this.codexExactReplaySuppressedSessionId !== this.anchor.sessionId &&
       this.anchor.codexReplayMode === "suffix" &&
       this.anchor.latestProbe?.outcome === "hit" &&
       this.anchor.latestProbe.replayMode === "suffix" &&
@@ -1196,7 +1203,8 @@ export class SessionWarmer {
       ? "modelWarm=all"
       : `modelWarm=${this.config.warmModels.join(",")}`;
     const codexReplay = api === "openai-codex-responses"
-      ? `codexReplay=${anchor?.codexReplayMode ?? this.resolveCodexReplayMode(model, anchor) ?? "suffix"} policy=${this.config.codexWarmMode ?? "auto"}`
+      ? `codexReplay=${anchor?.codexReplayMode ?? this.resolveCodexReplayMode(model, anchor) ?? "suffix"} policy=${this.config.codexWarmMode ?? "auto"}` +
+        (this.codexExactReplaySuppressedSessionId === anchor?.sessionId ? " exactFallback=paused" : "")
       : "";
     const stableBlock = [
       `lifecycle=${this.lifecycleState}`,
@@ -2392,6 +2400,21 @@ export class SessionWarmer {
           const usageBit =
             `out=${result.output} read=${result.cacheRead} write=${result.cacheWrite} in=${result.input}`;
           if (policy.decision === "soft-skip") {
+            const adaptiveExactFallback =
+              codexReplayMode === "exact" &&
+              this.config.codexWarmMode === "auto" &&
+              !this.options.exactCodexReplay;
+            if (adaptiveExactFallback) {
+              this.codexExactReplaySuppressedSessionId = anchor.sessionId;
+              anchor.codexReplayMode = "suffix";
+              const detail =
+                `Codex exact probe oversized (${usageBit}). Switched to suffix replay for this session; ` +
+                `automatic exact replay is paused (threshold=${CODEX_WARM_OUTPUT_ABORT_TOKENS}).`;
+              this.recordAttempt(reason, false, detail, usageSnap, outcome);
+              if (ctx.hasUI) ctx.ui.notify(`pi-warm-cache: ${detail}`, "warning");
+              this.showFailure(ctx, "codex exact output high · using suffix", detail);
+              return result;
+            }
             const detail =
               `Codex probe oversized (${usageBit}). Soft-skip #${policy.consecutiveAfter}; ` +
               `sticky-block on a second consecutive spike (threshold=${CODEX_WARM_OUTPUT_ABORT_TOKENS}).`;
