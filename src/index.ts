@@ -4,7 +4,7 @@
  * Keeps Anthropic / OpenAI prompt caches warm during long idle gaps in a Pi session.
  *
  * Core idea:
- * 1. Snapshot the exact provider payload on each real turn (`before_provider_request`).
+ * 1. Snapshot the provider payload after the complete `before_provider_request` chain.
  *    This hook is READ-ONLY. We never rewrite real user turns.
  * 2. After the agent settles, start a provider-specific timer (4m / 50m / 24m / ...).
  * 3. On tick, replay that payload with provider-legal output controls via
@@ -24,6 +24,7 @@ import { AdvisorWarmer } from "./advisor.ts";
 import { formatProbeCost } from "./savings.ts";
 import { ClaudeBridgeTransport } from "./claude-bridge.ts";
 import { NativeWarmingCoordinator, onNativeWarmingDecision } from "./compat.ts";
+import { FinalPayloadCapture } from "./payload-capture.ts";
 import { clearWarmUi, renderCapabilityNotice, renderIdleUi } from "./ui.ts";
 
 /**
@@ -103,6 +104,10 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
   bridge.bind(warmer);
   const advisorWarmer = new AdvisorWarmer(pi);
   const nativeWarming = new NativeWarmingCoordinator();
+  const captureUnavailable = (ctx: ExtensionContext) =>
+    warmer.invalidateAnchor(ctx, "final provider payload unavailable · warming disabled for this request");
+  const payloadCapture = new FinalPayloadCapture(
+    (payload, ctx) => warmer.onProviderRequestStart(payload, ctx), captureUnavailable);
   onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
   pi.on("turn_start", () => nativeWarming.onRealTurn());
   let config = { ...DEFAULT_CONFIG };
@@ -168,6 +173,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
     bridge.configure(ctx, config);
     warmer.bindContext(ctx);
     warmer.setConfig(config);
+    payloadCapture.install(ctx);
     advisorWarmer.configure(config, ctx);
 
     // Payload anchors are never restored across resume (turn-specific).
@@ -193,6 +199,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
   });
 
   pi.on("session_shutdown", async () => {
+    payloadCapture.dispose();
     nativeWarming.onRealTurn();
     advisorWarmer.dispose();
     bridge.dispose();
@@ -256,10 +263,13 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
    * Rewriting real turns (e.g. forcing ttl:1h) can 400 unsupported routes
    * and silently doubles cache-write cost outside Pi's retention gates.
    */
-  pi.on("before_provider_request", (event, ctx) => {
+  pi.on("before_provider_request", (_event, ctx) => {
     if (nativeWarming.isNativeRequest()) return;
-    // Registry.complete probes use their own onPayload, not this agent hook.
-    warmer.onProviderRequestStart(event.payload, ctx);
+    warmer.onProviderRequestPending(ctx);
+    // Later extensions can replace the object. Capture after the full chain.
+    if (!payloadCapture.observe(ctx)) {
+      captureUnavailable(ctx);
+    }
   });
 
   pi.on("message_end", async (event, ctx) => {

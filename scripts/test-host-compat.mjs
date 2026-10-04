@@ -50,7 +50,15 @@ const ctx = {
   modelRegistry: { complete: async () => { probeCalls++; throw new Error("unexpected extension probe"); } },
   ui: { notify: text => notices.push(text), setStatus() {}, setWidget() {}, theme: { fg: (_, text) => text } },
 };
+const captureRuntime = { streamSimple: async (_model, _context, options) => options.onPayload(payload, model) };
+ctx.modelRegistry.runtime = captureRuntime;
 async function emit(type, event = {}) {
+  if (type === "before_provider_request") {
+    return captureRuntime.streamSimple(ctx.model, {}, { onPayload: async () => (await emitHandlers(type, event)) ?? event.payload });
+  }
+  return emitHandlers(type, event);
+}
+async function emitHandlers(type, event = {}) {
   let result;
   for (const handler of extension.handlers.get(type) ?? []) result = await handler({ type, ...event }, ctx);
   return result;
@@ -63,6 +71,7 @@ const payload = { model: model.id, system: [{ type: "text", text: "fixture", cac
 async function status() { await command.handler("status", ctx); return notices.at(-1); }
 
 try {
+  await emit("session_start", { reason: "startup" });
   await command.handler("on interval=1h", ctx);
   await emit("turn_start");
   await emit("before_provider_request", { payload });

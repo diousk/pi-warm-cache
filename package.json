@@ -25,6 +25,7 @@
   },
   "files": [
     "src/compat.ts",
+    "src/payload-capture.ts",
     "src/advisor.ts",
     "src/claude-bridge.ts",
     "src/claude-bridge-hook.ts",

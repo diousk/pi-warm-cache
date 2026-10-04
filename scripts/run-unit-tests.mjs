@@ -76,7 +76,7 @@ console.log(`[run-unit-tests] advisor_test_sha256=${sha256File(advisorTestFile)}
 console.log(`[run-unit-tests] claude_test_sha256=${sha256File(claudeTestFile)}`);
 console.log(`[run-unit-tests] bytes=${bytes}`);
 
-for (const file of [resolve(root, "src/config.test.ts"), testFile, claudeTestFile, resolve(root, "src/claude-bridge.test.ts")]) {
+for (const file of [resolve(root, "src/config.test.ts"), testFile, claudeTestFile, resolve(root, "src/claude-bridge.test.ts"), resolve(root, "scripts/test-payload-capture.mjs")]) {
   const result = spawnSync(
     process.execPath,
     ["--experimental-strip-types", "--no-warnings", file],

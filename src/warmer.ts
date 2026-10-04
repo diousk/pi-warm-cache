@@ -1107,10 +1107,16 @@ export class SessionWarmer {
 
   /** Mark and capture a real provider request. Warm probes bypass this hook. */
   onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
+    this.onProviderRequestPending(ctx);
+    this.capturePayload(payload, ctx, requestStartedAt);
+    this.showAgentWorking(ctx);
+  }
+
+  /** Fence probes while asynchronous payload-rewriting hooks are still running. */
+  onProviderRequestPending(ctx: ExtensionContext): void {
     this.abort?.abort();
     this.clearTimers();
     this.providerRequestInFlight = true;
-    this.capturePayload(payload, ctx, requestStartedAt);
     this.showAgentWorking(ctx);
   }
 
