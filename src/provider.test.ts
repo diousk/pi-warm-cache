@@ -2946,6 +2946,7 @@ function deepEqualExcept<Actual, Expected>(
     intervalMs: 60_000,
     maxConsecutiveFailures: 3,
     allowCodexAutoWarm: true,
+    codexWarmMode: "exact",
   });
   warmer3.capturePayload(
     {
@@ -6147,6 +6148,121 @@ for (const tool of [
   );
   assert(forced.getStatusText().includes("codexReplay=exact policy=exact"), "forced exact mode should be visible in status");
   forced.dispose();
+}
+
+// An oversized exact probe in adaptive mode falls back to suffix for the rest
+// of the session and cannot be promoted back to exact by a later cache miss.
+{
+  const codexModel = modelFixture({
+    id: "gpt-6-astra",
+    provider: "openai-codex",
+    api: "openai-codex-responses",
+    baseUrl: "https://chatgpt.com/backend-api",
+    cost: { input: 2, cacheRead: 0.2, cacheWrite: 2, output: 4 },
+  });
+  const firstPayload = {
+    model: codexModel.id,
+    store: false,
+    stream: true,
+    instructions: "Reply briefly.",
+    input: [{ role: "user", content: [{ type: "input_text", text: "keep this exact prefix" }] }],
+    prompt_cache_key: "oversized-fallback-session",
+    tool_choice: "auto",
+  };
+  const nextPayload = {
+    ...firstPayload,
+    input: [
+      ...firstPayload.input,
+      { role: "assistant", content: [{ type: "output_text", text: "prior answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "continue" }] },
+    ],
+  };
+  const laterPayload = {
+    ...nextPayload,
+    input: [
+      ...nextPayload.input,
+      { role: "assistant", content: [{ type: "output_text", text: "another answer" }] },
+      { role: "user", content: [{ type: "input_text", text: "continue again" }] },
+    ],
+  };
+  let currentPayload: typeof firstPayload | typeof nextPayload | typeof laterPayload = firstPayload;
+  const replayed: Array<ReturnType<typeof payloadObject>> = [];
+  const responses = [5, 300, 5].map((output) => ({
+    stopReason: "stop" as const,
+    usage: { input: 1, output, cacheRead: 100, cacheWrite: 0, cost: { total: 0.01 } },
+  }));
+  const completeStub = completeFixture(async (
+    _model: Model<any>,
+    _context: WarmCompleteContext,
+    options?: ProbeRequestOptions,
+  ) => {
+    replayed.push(payloadObject(options?.onPayload?.(structuredClone(currentPayload), codexModel)));
+    const response = responses.shift();
+    assert(response, "fallback fixture must provide a response for each probe");
+    return response;
+  });
+  const ctx = contextFixture({
+    cwd: process.cwd(),
+    model: codexModel,
+    hasUI: false,
+    isIdle: () => true,
+    thinkingLevel: "off",
+    sessionManager: { getSessionId: () => "oversized-fallback-session" },
+    modelRegistry: {
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-key", headers: {}, env: {} }),
+    },
+  });
+  const warmer = new SessionWarmer(
+    extensionApiFixture({ getThinkingLevel: () => "off" }),
+    completeStub,
+  );
+  try {
+    warmer.bindContext(ctx);
+    warmer.setConfig({ ...DEFAULT_CONFIG, codexWarmMode: "auto", minCachedTokens: 10, intervalMs: 60_000 });
+    warmer.capturePayload(firstPayload, ctx);
+    warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
+
+    const suffixProbe = await warmer.warmNow(ctx);
+    assert(suffixProbe.cacheHit, "initial adaptive suffix probe should hit");
+    const firstReplayInput = replayed[0]?.input;
+    assert(Array.isArray(firstReplayInput) && firstReplayInput.length === 2,
+      "initial adaptive probe should append the bounded suffix");
+
+    currentPayload = nextPayload;
+    warmer.onProviderRequestStart(nextPayload, ctx);
+    warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 0, cacheWrite: 0, output: 2 });
+    assert(warmer.getStatusText().includes("codexReplay=exact policy=auto"), "comparable miss should enter adaptive exact mode");
+
+    const oversizedExact = await warmer.warmNow(ctx);
+    assert(oversizedExact.output === 300, "fixture should observe the oversized exact response");
+    assert(warmer.getLifecycleState() === "anchored", "one oversized exact response must not block adaptive warming");
+    assert(warmer.getAutoWarmBlockReason() === null, "automatic fallback should avoid sticky-blocking on the first exact spike");
+    assert(warmer.getStatusText().includes("codexReplay=suffix policy=auto exactFallback=paused"),
+      "status should report the suffix fallback and paused exact replay");
+
+    const fallbackProbe = await warmer.warmNow(ctx);
+    assert(fallbackProbe.cacheHit, "suffix fallback should remain eligible for warming");
+    const fallbackReplayInput = replayed[2]?.input;
+    assert(Array.isArray(fallbackReplayInput) && fallbackReplayInput.length === nextPayload.input.length + 1,
+      "fallback probe should append the bounded suffix to the current real prefix");
+
+    currentPayload = laterPayload;
+    warmer.onProviderRequestStart(laterPayload, ctx);
+    warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 0, cacheWrite: 0, output: 2 });
+    assert(warmer.getStatusText().includes("codexReplay=suffix policy=auto exactFallback=paused"),
+      "a later comparable cache miss must not promote exact replay again in the same session");
+
+    const nextSessionCtx = contextFixture({
+      ...ctx,
+      sessionManager: { getSessionId: () => "new-codex-session" },
+    });
+    warmer.bindContext(nextSessionCtx);
+    warmer.capturePayload(laterPayload, nextSessionCtx);
+    assert(!warmer.getStatusText().includes("exactFallback=paused"),
+      "the adaptive exact suppression should reset when a new session starts");
+  } finally {
+    warmer.dispose();
+  }
 }
 
 {

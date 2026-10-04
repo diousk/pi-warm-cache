@@ -143,7 +143,8 @@ export interface WarmCacheConfig {
   /**
    * Allow timer-based auto-warm on openai-codex-responses.
    * Default true. Replay shape is controlled separately by codexWarmMode;
-   * sticky block still trips if an uncapped exact replay is huge.
+   * adaptive mode falls back to suffix after an oversized exact replay, while
+   * repeated oversized responses still trigger the sticky block.
    * Disable with /warm codex-off.
    */
   allowCodexAutoWarm: boolean;
