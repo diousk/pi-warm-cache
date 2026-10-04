@@ -1,5 +1,9 @@
 # Final request capture and Luna miss investigation
 
+Integration update: merged into local main on top of the upstream 0.2.6 release,
+together with the earlier oversized adaptive-replay fallback. All merged tests,
+typecheck, and lint pass. The version remains 0.2.6; no new npm release was made.
+
 ## Confirmed defect and fix
 
 Pi runs `before_provider_request` handlers sequentially. Each handler can return
