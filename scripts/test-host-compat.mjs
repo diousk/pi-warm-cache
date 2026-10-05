@@ -1,7 +1,9 @@
 // Exercise the installed Pi loader and (on 0.86+) its actual CacheWarmer.
 // All provider calls are in-memory; no credentials or network are used.
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import * as ai from "@earendil-works/pi-ai";
@@ -223,6 +225,31 @@ try {
     }
     console.log(`Sol prewarm: Pi ${version} real adapter, zero output, read/write pricing passed`);
   }
+  const logDir = mkdtempSync(join(tmpdir(), "pi-integrated-log-"));
+  const previousCwd = ctx.cwd;
+  try {
+    ctx.cwd = logDir;
+    await command.handler("off log", ctx);
+    await emit("turn_start");
+    await emit("before_provider_request", { payload });
+    await emit("after_provider_response", { status: 200, headers: { "x-request-id": "req_integrated", authorization: "secret-header" } });
+    await emit("provider_stream_event", { provider: ctx.model.provider, model: ctx.model.id, data: {
+      type: "response.completed", response: { id: "resp_integrated", usage: { input_tokens: 2000, input_tokens_details: { cached_tokens: 0 } } },
+    } });
+    await emit("message_end", { message: { role: "assistant", usage } });
+    const file = join(logDir, ".pi", "warm-cache.jsonl");
+    const content = readFileSync(file, "utf8");
+    const lines = content.trim().split("\n").map(JSON.parse);
+    assert(lines.some(e => e.event === "cache_diagnostic_response" && e.responseId === "resp_integrated"));
+    assert(lines.some(e => e.event === "cache_diagnostic_http" && e.requestId === "req_integrated"));
+    assert(!content.includes("secret-header"));
+    await command.handler("log=off", ctx);
+    const afterOff = readFileSync(file, "utf8");
+    await emit("turn_start");
+    await emit("before_provider_request", { payload });
+    await emit("message_end", { message: { role: "assistant", usage } });
+    assert.equal(readFileSync(file, "utf8"), afterOff, "log=off must stop file writes");
+  } finally { ctx.cwd = previousCwd; rmSync(logDir, { recursive: true, force: true }); }
   assert.equal(probeCalls, 0);
   console.log(`host compatibility: Pi ${version} passed`);
 } finally { await emit("session_shutdown"); }

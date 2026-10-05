@@ -23,7 +23,7 @@ import { SessionWarmer } from "./warmer.ts";
 import { AdvisorWarmer } from "./advisor.ts";
 import { formatProbeCost } from "./savings.ts";
 import { ClaudeBridgeTransport } from "./claude-bridge.ts";
-import { NativeWarmingCoordinator, onNativeWarmingDecision } from "./compat.ts";
+import { NativeWarmingCoordinator, onNativeWarmingDecision, onRawProviderEvent } from "./compat.ts";
 import { FinalPayloadCapture } from "./payload-capture.ts";
 import { clearWarmUi, renderCapabilityNotice, renderIdleUi } from "./ui.ts";
 
@@ -110,6 +110,12 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
     (payload, ctx) => warmer.onProviderRequestStart(payload, ctx), captureUnavailable);
   onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
   pi.on("turn_start", () => nativeWarming.onRealTurn());
+  onRawProviderEvent(pi, event => {
+    if (!nativeWarming.isNativeRequest()) warmer.onProviderStreamEvent(event.data, event.provider, event.model);
+  });
+  pi.on("after_provider_response", event => {
+    if (!nativeWarming.isNativeRequest()) warmer.onProviderResponseHeaders(event.headers, event.status);
+  });
   let config = { ...DEFAULT_CONFIG };
   let availableWarmModels: Model<any>[] = [];
   const refreshAvailableWarmModels = (ctx: ExtensionContext) => {
@@ -126,6 +132,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
   });
 
   pi.on("session_start", async (event, ctx) => {
+    warmer.resetDiagnostics();
     refreshAvailableWarmModels(ctx);
     nativeWarming.onRealTurn();
     advisorWarmer.dispose();

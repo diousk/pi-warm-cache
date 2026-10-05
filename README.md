@@ -508,6 +508,36 @@ The file is `.pi/warm-cache.jsonl` in the working directory.
 It stores route names, counts, and redacted fingerprints.
 It does not store prompts or API keys.
 
+`/warm log` (or `/warm log=on`) now also records main-agent cache diagnostics;
+`/warm log=off` stops logging immediately and clears the diagnostic baseline.
+You do not need the standalone diagnostic extension or a preload script.
+
+- `cache_diagnostic_request`: SHA-256 settings/key fingerprints and whether the
+  previous serialized prefix, settings or model route changed. Captured **after**
+  all request-rewriting hooks, not from an intermediate payload.
+- `cache_diagnostic_response`: raw Responses/Codex cache usage, response ID,
+  previous response ID, returned model/tier, and a conservative reason label.
+- `cache_diagnostic_http`: only status and `x-request-id`, when exposed by Pi.
+
+An explicit zero is `cachedTokens: 0`; missing/invalid usage is `null` and is
+never treated as a confirmed miss. `cachedTokensPresent` separately records
+whether the raw field existed. `provider_zero_cache_unknown_cause` means the
+provider returned zero while the observed prefix and settings stayed stable;
+it does **not** prove eviction, routing, TTL expiry, or a billing error.
+`settings_changed`, `prefix_changed`, and `route_changed` identify observed
+differences, not a provider-confirmed root cause. `no_prior_request` means there
+is no comparison baseline since logging started, not necessarily a cold cache.
+
+Hosts/providers without the raw Responses stream event log
+`raw_response_unavailable` instead. Existing normalized usage/probe logs remain
+available. These new events cover real main-agent requests, not advisor/native
+warming or extension probes, and do not alter their counters or behavior.
+Connection counters still require the optional standalone preload; normal
+`/warm log` does not claim to know backend routing or WebSocket reuse.
+Correlation IDs are intended for private support reports. Full prompts, model
+output, authorization, cookies, and other HTTP headers are not stored by these
+diagnostic events.
+
 ## Common cases
 
 - After compaction or a model change, wait for the next real turn.

@@ -1,0 +1,80 @@
+import assert from "node:assert/strict";
+import { CacheDiagnostics } from "../src/diagnostics.ts";
+
+const entries = [];
+const diagnostics = new CacheDiagnostics(entry => entries.push(entry));
+const route = { sessionId: "fixture", provider: "openai-codex", modelId: "gpt-6-luna", api: "openai-codex-responses" };
+const payload = { model: route.modelId, input: [{ role: "user", content: "private prompt" }], prompt_cache_key: "private key", service_tier: "default" };
+const original = structuredClone(payload);
+const raw = (cached, id = "resp_fixture") => ({ type: "response.completed", response: {
+  id, model: route.modelId, service_tier: "default", usage: {
+    input_tokens: 20000, input_tokens_details: { cached_tokens: cached, cache_write_tokens: 0 },
+  }, output: [{ text: "private output" }],
+} });
+const stream = event => diagnostics.stream(event, route.provider, route.modelId);
+diagnostics.capture(payload, route); stream(raw(0)); diagnostics.finish();
+assert.equal(entries.length, 0, "disabled means no records");
+diagnostics.configure(true);
+diagnostics.capture(payload, route);
+diagnostics.headers({ "X-Request-ID": "req_fixture", authorization: "secret-auth", "set-cookie": "secret-cookie" }, 200);
+stream(raw(0));
+assert.equal(entries.at(-1).reason, "no_prior_request");
+assert.equal(entries.at(-1).cachedTokensPresent, true);
+const beforeDuplicate = entries.length;
+stream(raw(0)); diagnostics.finish();
+assert.equal(entries.length, beforeDuplicate, "terminal events must not be counted twice");
+assert.equal(entries.find(e => e.event === "cache_diagnostic_http").requestId, "req_fixture");
+const continued = { ...payload, input: [...payload.input, { role: "user", content: "next" }] };
+diagnostics.capture(continued, route);
+stream(raw(19000, "resp_hit")); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "cache_read_reported");
+assert.equal(entries.at(-1).previousResponseId, "resp_fixture");
+assert.equal(entries.at(-1).prefixChanged, false);
+diagnostics.capture(continued, route); stream(raw(0)); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "provider_zero_cache_unknown_cause");
+assert.equal(entries.at(-1).previousResponseId, "resp_hit");
+const changedSettings = { ...continued, service_tier: "priority" };
+diagnostics.capture(changedSettings, route); stream(raw(0)); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "settings_changed");
+diagnostics.capture({ ...changedSettings, input: [{ role: "user", content: "different" }] }, route);
+stream(raw(0)); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "prefix_changed");
+diagnostics.capture(payload, { ...route, provider: "other-provider" });
+const beforeWrongRoute = entries.length;
+stream(raw(0));
+assert.equal(entries.length, beforeWrongRoute, "unrelated routes are ignored");
+diagnostics.stream(raw(0), "other-provider", route.modelId);
+assert.equal(entries.at(-1).reason, "route_changed");
+diagnostics.finish();
+for (const cached of [undefined, null, -1, "0", NaN]) {
+  diagnostics.capture(payload, route); stream(raw(cached)); diagnostics.finish();
+  assert.equal(entries.at(-1).reason, "raw_usage_missing_or_invalid");
+  assert.equal(entries.at(-1).cachedTokens, null);
+}
+diagnostics.capture(payload, route);
+stream({ type: "response.completed", response: { id: "resp_missing", usage: {} } });
+assert.equal(entries.at(-1).cachedTokensPresent, false);
+diagnostics.finish();
+diagnostics.capture(payload, route); stream({ ...raw(0), type: "response.failed" }); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "non_completed_response");
+diagnostics.capture(payload, route); diagnostics.finish();
+assert.equal(entries.at(-1).reason, "raw_response_unavailable");
+diagnostics.capture(payload, { ...route, sessionId: "new-session" });
+assert.equal(entries.at(-1).request, 1);
+assert.equal(entries.at(-1).previousResponseId, null);
+diagnostics.configure(false);
+const disabledCount = entries.length;
+diagnostics.headers({ "x-request-id": "ignored" }, 200); stream(raw(0)); diagnostics.finish();
+assert.equal(entries.length, disabledCount, "switching log off fences an in-flight request");
+diagnostics.configure(true);
+diagnostics.capture(payload, route);
+assert.equal(entries.at(-1).previousResponseId, null);
+assert.equal(entries.at(-1).settingsChanged, null);
+diagnostics.cancelPending();
+const afterCancel = entries.length;
+stream(raw(0)); diagnostics.finish();
+assert.equal(entries.length, afterCancel, "requests without a final captured payload cannot reuse a stale active request");
+assert.deepEqual(payload, original, "diagnostics must not rewrite payloads");
+const serialized = JSON.stringify(entries);
+for (const secret of ["private prompt", "private key", "private output", "secret-auth", "secret-cookie"]) assert(!serialized.includes(secret));
+console.log("integrated cache diagnostics: all assertions passed");

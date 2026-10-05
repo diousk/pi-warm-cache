@@ -1,4 +1,5 @@
 import { effectiveMode } from "./config.ts";
+import { CacheDiagnostics } from "./diagnostics.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   appendWarmUserTurn,
@@ -270,6 +271,7 @@ export class SessionWarmer {
   private plan: StrategyResolution | null = null;
   private lastLongTtlWarning: string | null = null;
   private logFile: string | null = null;
+  private diagnostics = new CacheDiagnostics(entry => this.log(entry));
   /**
    * Sticky session block for auto-warm (survives next real-turn re-anchor).
    * Used when Codex produces uncapped large output. Cleared only by explicit
@@ -435,6 +437,7 @@ export class SessionWarmer {
   }
 
   setConfig(config: WarmCacheConfig): void {
+    this.diagnostics.configure(config.logToFile);
     if (effectiveMode(config) !== effectiveMode(this.config)) this.abort?.abort();
     this.config = {
       ...config,
@@ -528,6 +531,7 @@ export class SessionWarmer {
   }
 
   dispose(): void {
+    this.diagnostics.reset();
     this.disposed = true;
     this.lifecycleState = "disabled";
     this.clearTimers();
@@ -1107,13 +1111,19 @@ export class SessionWarmer {
 
   /** Mark and capture a real provider request. Warm probes bypass this hook. */
   onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
+    this.ctx = ctx;
     this.onProviderRequestPending(ctx);
+    if (ctx.model) this.diagnostics.capture(payload, {
+      sessionId: ctx.sessionManager.getSessionId(), provider: ctx.model.provider,
+      modelId: ctx.model.id, api: ctx.model.api,
+    });
     this.capturePayload(payload, ctx, requestStartedAt);
     this.showAgentWorking(ctx);
   }
 
   /** Fence probes while asynchronous payload-rewriting hooks are still running. */
   onProviderRequestPending(ctx: ExtensionContext): void {
+    this.diagnostics.cancelPending();
     this.abort?.abort();
     this.clearTimers();
     this.providerRequestInFlight = true;
@@ -1122,8 +1132,19 @@ export class SessionWarmer {
 
   /** An assistant response ended, so no real provider request is in flight. */
   onAssistantMessageEnd(ctx: ExtensionContext): void {
+    this.diagnostics.finish();
     this.ctx = ctx;
     this.providerRequestInFlight = false;
+  }
+
+  onProviderStreamEvent<Data>(data: Data, provider: string, modelId: string): void {
+    this.diagnostics.stream(data, provider, modelId);
+  }
+
+  resetDiagnostics(): void { this.diagnostics.reset(); }
+
+  onProviderResponseHeaders<Headers>(headers: Headers, status: number): void {
+    this.diagnostics.headers(headers, status);
   }
 
   onToolExecutionStart(

@@ -37,6 +37,14 @@ export function onNativeWarmingDecision(pi: ExtensionAPI, handler: NativeDecisio
   events.on("cache_warming_decision", handler);
 }
 
+/** Parsed stream events are optional on older hosts; their loader accepts inert names. */
+type RawProviderHandler = (event: { data: unknown; provider: string; model: string }) => void;
+export function onRawProviderEvent(pi: ExtensionAPI, handler: RawProviderHandler): void {
+  // SAFETY: newer Pi emits this read-only contract; older loaders never emit it.
+  const events = pi as ExtensionAPI & { on(event: "provider_stream_event", handler: RawProviderHandler): void };
+  events.on("provider_stream_event", handler);
+}
+
 /** Native refreshes reuse before_provider_request but do not emit turn_start. */
 export class NativeWarmingCoordinator {
   private nativeRequest = false;

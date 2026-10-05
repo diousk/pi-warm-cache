@@ -1,6 +1,6 @@
 {
   "name": "@diousk/pi-warm-cache",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Pi extension that keeps supported provider prompt caches warm during long idle gaps",
   "type": "module",
   "keywords": [
@@ -33,6 +33,7 @@
     "src/config.ts",
     "src/index.ts",
     "src/log.ts",
+    "src/diagnostics.ts",
     "src/provider.ts",
     "src/savings.ts",
     "src/types.ts",
