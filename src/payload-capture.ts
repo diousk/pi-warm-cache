@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Api, Context, Model, SimpleStreamOptions, AssistantMessageEventStream } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, ModelsRequestTransforms, ModelsSimpleStreamOptions, AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-type Stream = (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
+type Stream = (model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions) => AssistantMessageEventStream;
 interface Runtime { streamSimple: Stream }
 interface RequestScope { ctx?: ExtensionContext }
+export type TransformHeaders = ModelsRequestTransforms["transformHeaders"];
 
 /** Observe the result of the entire agent hook chain, not an intermediate hook payload.
  * The private runtime boundary is capability checked; unsupported hosts fail closed.
@@ -15,9 +16,9 @@ export class FinalPayloadCapture {
   private original?: Stream;
   private wrapper?: Stream;
 
-  private capture: <Payload>(payload: Payload, ctx: ExtensionContext) => void;
+  private capture: <Payload>(payload: Payload, ctx: ExtensionContext, transformHeaders?: TransformHeaders) => void;
   private unavailable: (ctx: ExtensionContext) => void;
-  constructor(capture: <Payload>(payload: Payload, ctx: ExtensionContext) => void,
+  constructor(capture: <Payload>(payload: Payload, ctx: ExtensionContext, transformHeaders?: TransformHeaders) => void,
     unavailable: (ctx: ExtensionContext) => void = () => {}) {
     this.capture = capture;
     this.unavailable = unavailable;
@@ -34,6 +35,8 @@ export class FinalPayloadCapture {
     const wrapper: Stream = (model, context, options) => {
       if (this.wrapper !== wrapper || !options?.onPayload) return original.call(runtime, model, context, options);
       const onPayload = options.onPayload;
+      // Pi's header chain (before_provider_headers); probes reuse it so header-tagging extensions still apply.
+      const transformHeaders = options.transformHeaders;
       return original.call(runtime, model, context, {
         ...options,
         onPayload: (payload, requestModel) => {
@@ -43,7 +46,7 @@ export class FinalPayloadCapture {
             const observed = scope.ctx;
             if (this.wrapper === wrapper && observed) {
               if (observed.model?.provider === model.provider && observed.model.id === model.id) {
-                try { this.capture(replacement === undefined ? payload : replacement, observed); }
+                try { this.capture(replacement === undefined ? payload : replacement, observed, transformHeaders); }
                 catch { this.unavailable(observed); }
               } else this.unavailable(observed);
             }

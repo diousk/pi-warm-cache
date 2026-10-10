@@ -46,6 +46,7 @@ import {
   renderRefreshingUi,
 } from "./ui.ts";
 import type { StrategyResolution } from "./provider.ts";
+import type { TransformHeaders } from "./payload-capture.ts";
 import type {
   CacheAnchor,
   CodexWarmMode,
@@ -263,6 +264,7 @@ export class SessionWarmer {
   /** Retained probe diagnostics after a drift invalidation, never used for replay. */
   private lastInvalidatedProbe: ProbeObservation | null = null;
   private lastPayload: unknown | null = null;
+  private lastTransformHeaders: TransformHeaders;
   private capability: ProviderCapability | null = null;
   private ctx: ExtensionContext | null = null;
   /** Continuity boundary applied to the next captured real turn. */
@@ -630,7 +632,7 @@ export class SessionWarmer {
   }
 
   /** Capture the exact provider payload from a real agent turn. Read-only. */
-  capturePayload<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
+  capturePayload<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now(), transformHeaders?: TransformHeaders): void {
     if (!payloadObject(payload)) return;
 
     this.anchorRevision += 1;
@@ -756,6 +758,7 @@ export class SessionWarmer {
 
     this.lastInvalidatedProbe = null;
     this.lastPayload = structuredClone(payload);
+    this.lastTransformHeaders = transformHeaders;
     this.plan = this.resolvePlan(model, this.lastPayload);
     const reanchorTransition = this.pendingReanchor;
     const capturedAt = Date.now();
@@ -1110,14 +1113,14 @@ export class SessionWarmer {
   }
 
   /** Mark and capture a real provider request. Warm probes bypass this hook. */
-  onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now()): void {
+  onProviderRequestStart<Payload>(payload: Payload, ctx: ExtensionContext, requestStartedAt = Date.now(), transformHeaders?: TransformHeaders): void {
     this.ctx = ctx;
     this.onProviderRequestPending(ctx);
     if (ctx.model) this.diagnostics.capture(payload, {
       sessionId: ctx.sessionManager.getSessionId(), provider: ctx.model.provider,
       modelId: ctx.model.id, api: ctx.model.api,
     });
-    this.capturePayload(payload, ctx, requestStartedAt);
+    this.capturePayload(payload, ctx, requestStartedAt, transformHeaders);
     this.showAgentWorking(ctx);
   }
 
@@ -2326,6 +2329,7 @@ export class SessionWarmer {
           maxTokens: this.config.maxOutputTokens,
           cacheRetention: plan.cacheRetention,
           sessionId: anchor.sessionId,
+          transformHeaders: this.lastTransformHeaders,
           onPayload: () => {
             if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
               throw new Error("probe superseded");
