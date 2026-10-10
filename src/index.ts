@@ -107,7 +107,7 @@ export default function piWarmCache(pi: ExtensionAPI, saveConfig?: (config: Warm
   const captureUnavailable = (ctx: ExtensionContext) =>
     warmer.invalidateAnchor(ctx, "final provider payload unavailable · warming disabled for this request");
   const payloadCapture = new FinalPayloadCapture(
-    (payload, ctx) => warmer.onProviderRequestStart(payload, ctx), captureUnavailable);
+    (payload, ctx, transformHeaders) => warmer.onProviderRequestStart(payload, ctx, undefined, transformHeaders), captureUnavailable);
   onNativeWarmingDecision(pi, (_event, ctx) => nativeWarming.decide(warmer.ownsAutomaticWarming(ctx)));
   pi.on("turn_start", () => nativeWarming.onRealTurn());
   onRawProviderEvent(pi, event => {

@@ -9,7 +9,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import "./advisor.test.ts";
 import { tmpdir } from "node:os";
-import type { Model } from "@earendil-works/pi-ai";
+import type { Model, ProviderHeaders } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -2616,7 +2616,8 @@ function deepEqualExcept<Actual, Expected>(
 
 // 10b) Default probe path uses modelRegistry.complete and does not assemble auth.
 {
-  const calls: Array<{ apiKey?: unknown; headers?: unknown; env?: unknown }> = [];
+  const calls: Array<{ apiKey?: unknown; headers?: unknown; env?: unknown; transformHeaders?: unknown }> = [];
+  const transformHeaders = (headers: ProviderHeaders) => ({ ...headers, "x-extension-session": "registry-complete-test" });
   const model = modelFixture({
     id: "gpt-5.6",
     provider: "openai",
@@ -2646,11 +2647,13 @@ function deepEqualExcept<Actual, Expected>(
         apiKey?: unknown;
         headers?: unknown;
         env?: unknown;
+        transformHeaders?: unknown;
       }) => {
         calls.push({
           apiKey: options?.apiKey,
           headers: options?.headers,
           env: options?.env,
+          transformHeaders: options?.transformHeaders,
         });
         return {
           stopReason: "stop",
@@ -2669,6 +2672,8 @@ function deepEqualExcept<Actual, Expected>(
       prompt_cache_key: "registry-complete",
     },
     ctx,
+    Date.now(),
+    transformHeaders,
   );
   warmer.noteAssistantUsage(ctx, { input: 20, cacheRead: 100, cacheWrite: 0, output: 2 });
   const result = await warmer.warmNow(ctx);
@@ -2677,6 +2682,7 @@ function deepEqualExcept<Actual, Expected>(
   assert(calls[0]?.apiKey === undefined, "registry complete must receive no hand-built apiKey");
   assert(calls[0]?.headers === undefined, "registry complete must receive no hand-built headers");
   assert(calls[0]?.env === undefined, "registry complete must receive no hand-built env");
+  assert(calls[0]?.transformHeaders === transformHeaders, "probe must run the real turn's provider header chain");
   warmer.dispose();
 
   const missing = contextFixture({
