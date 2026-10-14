@@ -146,6 +146,13 @@ This no-output mechanism is restricted to `openai` / `openai-responses` at
 subscription endpoint retain their existing replay policies; the OpenAI API's
 prewarm field is not assumed to work there.
 
+If OpenAI returns a parameter-rejection HTTP 400 for a probe's newly added
+`prompt_cache_options`, the extension retries once with a small output cap and
+uses the older implicit-cache cadence for that model/endpoint until reload.
+The downgrade survives new real turns and model switches, but does not affect
+other routes or change Pi's model metadata. Existing cache options captured
+from real requests are never stripped, and unrelated API errors are not retried.
+
 Sources: [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
 and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
 The Pi 0.99.1 host test verifies the catalog prices and real Responses adapter

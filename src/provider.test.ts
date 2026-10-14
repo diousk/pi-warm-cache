@@ -32,6 +32,7 @@ import {
   isBestEffortNoWriteFamily,
   isCodexPayload,
   isPayloadContinuation,
+  isUnsupportedPromptCacheOptionsError,
   minimumOutputTokensForPayload,
   modelSupportsLongCacheRetention,
   opencodeGoForeignInstrumentationReason,
@@ -397,6 +398,111 @@ function deepEqualExcept<Actual, Expected>(
       "a successful no-output prewarm must count as a hit");
     assert(result.costUsd === 0.0002, "Sol's 5% cache-read price must be preserved");
   } finally { warmer.dispose(); }
+}
+
+// Catalog prewarm support can disagree with the actual OpenAI model/endpoint.
+{
+  const rejection = 'OpenAI API error (400): {"message":"prompt_cache_options is not supported on this model","type":"invalid_request_error","param":"prompt_cache_options","code":"invalid_parameter"}';
+  assert(isUnsupportedPromptCacheOptionsError(rejection), "recognize the reported API rejection");
+  assert(isUnsupportedPromptCacheOptionsError("OpenAI API error (400): Unsupported parameter: 'prompt_cache_options'"),
+    "recognize unsupported-parameter wording");
+  for (const error of ["OpenAI API error (401): prompt_cache_options is not supported",
+    "OpenAI API error (400): max_output_tokens is not supported on this model",
+    "OpenAI API error (400): invalid prompt_cache_options ttl", "network timeout"]) {
+    assert(!isUnsupportedPromptCacheOptionsError(error), "unrelated errors must not authorize retries");
+  }
+  const selected = modelFixture({
+    id: "gpt-6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1",
+    compat: { supportsExplicitPromptCacheMode: true },
+    cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+  });
+  // This direct Responses shape also resembles Codex; the API must determine caps.
+  const original = {
+    model: selected.id, instructions: "unchanged prefix", store: false,
+    input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    prompt_cache_key: "fallback-session", reasoning: { effort: "low" },
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
+  };
+  for (const thrown of [false, true]) {
+    const replays: NonNullable<ReturnType<typeof payloadObject>>[] = [];
+    const ctx = contextFixture({
+      cwd: process.cwd(), model: selected, hasUI: false, isIdle: () => true,
+      sessionManager: { getSessionId: () => "fallback-session" },
+    });
+    const complete = completeFixture(async (model: Model<any>, _context: WarmCompleteContext,
+      options?: ProbeRequestOptions) => {
+      const replay = payloadObject(options?.onPayload?.({}, model));
+      assert(replay, "probe must have a replay payload");
+      replays.push(replay);
+      if (replays.length === 1) {
+        if (thrown) throw new Error(rejection);
+        return { stopReason: "error", errorMessage: rejection };
+      }
+      return { stopReason: "stop", usage: { input: 0, output: 1, cacheRead: 2000, cacheWrite: 0, cost: { total: 0.0002 } } };
+    });
+    const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "low" }), complete);
+    try {
+      warmer.bindContext(ctx);
+      warmer.setConfig({ ...DEFAULT_CONFIG, intervalMs: null });
+      warmer.capturePayload(original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      const result = thrown ? await runTimerWarm(warmer) : await warmer.warmNow(ctx);
+      assert(result.ok && result.cacheHit && replays.length === 2, "manual and timer probes retry returned and thrown 400s once successfully");
+      assert(payloadObject(replays[0]?.prompt_cache_options)?.prewarm === true, "first probe tries catalog prewarming");
+      assert(!("prompt_cache_options" in replays[1]!), "fallback must omit the injected field");
+      assert(replays[1]?.max_output_tokens === 16, "fallback must be capped even for Codex-like direct Responses");
+      deepEqualExcept(original, replays[1], WARM_MUTABLE_PAYLOAD_KEYS);
+      assert(!("prompt_cache_options" in original) && getModelCompat(selected)?.supportsExplicitPromptCacheMode === true,
+        "neither real payload nor host model metadata may be mutated");
+      assert(warmer.getStatusText().includes("strategy=openai-implicit"), "fallback must downgrade its advertised TTL/cadence");
+      await warmer.warmNow(ctx);
+      assert(Number(replays.length) === 3 && !("prompt_cache_options" in replays[2]!), "later probes remember the rejection");
+      warmer.capturePayload(original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(ctx);
+      assert(!("prompt_cache_options" in replays[3]!), "reanchoring must preserve the route downgrade");
+      const other = contextFixture({ ...ctx, model: modelFixture({ ...selected, id: "gpt-6.1-sol" }) });
+      warmer.onModelChange(other);
+      warmer.capturePayload({ ...original, model: "gpt-6.1-sol" }, other);
+      warmer.noteAssistantUsage(other, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(other);
+      assert(payloadObject(replays[4]?.prompt_cache_options)?.prewarm === true, "a different model retains prewarming");
+      const endpoint = contextFixture({ ...ctx, model: modelFixture({ ...selected, baseUrl: "https://api.openai.com" }) });
+      warmer.onModelChange(endpoint);
+      warmer.capturePayload(original, endpoint);
+      warmer.noteAssistantUsage(endpoint, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(endpoint);
+      assert(payloadObject(replays[5]?.prompt_cache_options)?.prewarm === true, "a different endpoint retains its own capability");
+    } finally { warmer.dispose(); }
+  }
+
+  for (const scenario of ["unrelated", "captured-options", "retry-fails", "superseded"] as const) {
+    let calls = 0;
+    const ctx = contextFixture({
+      cwd: process.cwd(), model: selected, hasUI: false, isIdle: () => true,
+      sessionManager: { getSessionId: () => "fallback-session" },
+    });
+    const complete = completeFixture(async (model: Model<any>, _context: WarmCompleteContext,
+      options?: ProbeRequestOptions) => {
+      options?.onPayload?.({}, model);
+      calls += 1;
+      if (scenario === "superseded") warmer.onModelChange(ctx);
+      return { stopReason: "error", errorMessage: scenario === "unrelated"
+        ? "OpenAI API error (400): max_output_tokens is not supported on this model" : rejection };
+    });
+    const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "low" }), complete);
+    try {
+      warmer.bindContext(ctx);
+      warmer.setConfig(DEFAULT_CONFIG);
+      warmer.capturePayload(scenario === "captured-options"
+        ? { ...original, prompt_cache_options: { ttl: "30m" } } : original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      const result = await warmer.warmNow(ctx);
+      assert(!result.ok && calls === (scenario === "retry-fails" ? 2 : 1),
+        "never retry unrelated errors, captured cache settings, superseded probes, or a failed fallback");
+      assert(warmer.getActiveWarmSessions() === 0, "fallback must release the concurrency slot");
+    } finally { warmer.dispose(); }
+  }
 }
 
 // 2a) xAI Responses: cap only the legal output field and preserve cache identity.
