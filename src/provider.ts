@@ -190,7 +190,7 @@ export function isOpenAIModel(model: Model<any> | undefined): boolean {
     (model.provider === "openai" &&
       (model.api === "openai-responses" || model.api === "openai-completions")) ||
     (model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-    (model.provider === "azure-openai-responses" && model.api === "azure-openai-responses") ||
+    (["azure", "azure-openai-responses"].includes(model.provider) && model.api === "azure-openai-responses") ||
     (model.provider === "github-copilot" &&
       (model.api === "openai-responses" || model.api === "openai-completions"))
   );

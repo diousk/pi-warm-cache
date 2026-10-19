@@ -112,6 +112,8 @@ type ProxyRouteRegistration = {
   host: string;
   /** Exact path after trailing-slash normalization, e.g. "/zen/go/v1". */
   baseUrlPath: string;
+  /** New official paths without cache evidence remain available only for manual probes. */
+  unverifiedBaseUrlPaths?: readonly string[];
   /**
    * The payload shapes this transport can legally carry. `isSafeReplayPayload`
    * enforces the same shapes on a captured payload before a manual probe.
@@ -168,6 +170,7 @@ export const PROXY_ROUTE_REGISTRY: readonly ProxyRouteRegistration[] = [
     api: "anthropic-messages",
     host: "opencode.ai",
     baseUrlPath: "/zen/go",
+    unverifiedBaseUrlPaths: ["/inference/go"],
     payloadEligibility: "messages-and-system",
     families: {
       "short-marker": verifiedFamily(
@@ -183,6 +186,7 @@ export const PROXY_ROUTE_REGISTRY: readonly ProxyRouteRegistration[] = [
     api: "openai-completions",
     host: "opencode.ai",
     baseUrlPath: "/zen/go/v1",
+    unverifiedBaseUrlPaths: ["/inference/go/v1"],
     payloadEligibility: "messages",
     families: {
       plain: verifiedFamily(
@@ -199,6 +203,7 @@ export const PROXY_ROUTE_REGISTRY: readonly ProxyRouteRegistration[] = [
     api: "openai-responses",
     host: "opencode.ai",
     baseUrlPath: "/zen/go/v1",
+    unverifiedBaseUrlPaths: ["/inference/go/v1"],
     payloadEligibility: "input",
     families: {
       plain: verifiedFamily(
@@ -273,7 +278,7 @@ function hasExactProxyBaseUrl(
     if (url.hostname.toLowerCase() !== registration.host) return false;
     let path = url.pathname;
     if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-    return path === registration.baseUrlPath;
+    return path === registration.baseUrlPath || Boolean(registration.unverifiedBaseUrlPaths?.includes(path));
   } catch {
     return false;
   }
@@ -375,6 +380,15 @@ function resolveProxyRouteCapability<Payload>(
     // manualProbe stays false, so the refusal gates /warm now and the manual
     // probe flags for this payload only.
     return capability("unverified", foreignReason);
+  }
+
+  const routePath = new URL(model.baseUrl).pathname.replace(/\/$/, "");
+  if (registration.unverifiedBaseUrlPaths?.includes(routePath)) {
+    return capability(
+      "unverified",
+      `${label} official inference endpoint is registered for manual-only probing; automatic warming is disabled and savings are n/a until this endpoint has cache evidence`,
+      true,
+    );
   }
 
   // The Go family is payload-driven. Verification is per (api, family) with
@@ -801,7 +815,7 @@ export function resolveProviderCapability<Payload = undefined>(
       "OpenAI route baseUrl is not api.openai.com; API-compatible routes do not inherit first-party cache strategies",
     );
   }
-  if (model.provider === "azure-openai-responses" && model.api === "azure-openai-responses") {
+  if (["azure", "azure-openai-responses"].includes(model.provider) && model.api === "azure-openai-responses") {
     return capability("verified", "registered Azure OpenAI Responses route");
   }
 

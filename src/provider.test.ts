@@ -1073,6 +1073,26 @@ function deepEqualExcept<Actual, Expected>(
     "OpenRouter routes with missing metadata must not enable manualProbe",
   );
 
+  for (const provider of ["azure", "azure-openai-responses"]) {
+    const azure = modelFixture({ provider, api: "azure-openai-responses", id: "gpt-6.1-sol" });
+    assert(resolveProviderCapability(azure).state === "verified", `${provider} must recognize Azure Responses`);
+    assert(resolveStrategy(azure, DEFAULT_CONFIG).family !== "unsupported", `${provider} must select its Responses strategy`);
+  }
+  for (const [api, suffix] of [["anthropic-messages", ""], ["openai-completions", "/v1"], ["openai-responses", "/v1"]]) {
+    const model = modelFixture({ provider: "opencode-go", api, baseUrl: `https://opencode.ai/inference/go${suffix}` });
+    for (const slash of ["", "/"]) {
+      const capability = resolveProviderCapability(modelFixture({ ...model, baseUrl: `${model.baseUrl}${slash}` }));
+      assert(capability.state === "unverified" && capability.manualProbe && !capability.automaticWarm, `${api} inference path must permit only explicit probes`);
+    }
+    for (const baseUrl of ["https://proxy.example/inference/go", `${model.baseUrl}/extra`, "http://opencode.ai/inference/go"]) {
+      assert(resolveProviderCapability(modelFixture({ ...model, baseUrl })).state === "unsupported", `${api} must reject an unregistered inference endpoint`);
+    }
+    if (api === "openai-completions") {
+      const capability = resolveProviderCapability(model, { messages: [], cache_control: { type: "ephemeral" } });
+      assert(!capability.manualProbe && !capability.automaticWarm, "new paths must retain the foreign-marker refusal");
+    }
+  }
+
   // OpenCode Go: per-api proxy route registry with exact baseUrl paths.
   {
     // Exercise every installed catalog route without pinning a moving model count.
@@ -1103,7 +1123,14 @@ function deepEqualExcept<Actual, Expected>(
     for (const model of goModels) {
       goApiCounts[model.api] = (goApiCounts[model.api] ?? 0) + 1;
       const capability = resolveProviderCapability(model);
-      if (model.api === "anthropic-messages") {
+      if (model.api === "google-generative-ai") {
+        assert(capability.state === "unsupported", "unregistered Google transport must stay unsupported");
+        assert(!capability.automaticWarm && !capability.manualProbe, "Google transport must not probe");
+      } else if (new URL(model.baseUrl).pathname.startsWith("/inference/")) {
+        assert(capability.state === "unverified", "new inference endpoints need their own cache evidence");
+        assert(!capability.automaticWarm && capability.manualProbe, "new official paths support manual probes only");
+        assert(capability.reason.includes("savings are n/a"), "new endpoint must not claim savings");
+      } else if (model.api === "anthropic-messages") {
         // (anthropic-messages, plain-fallback) has no e2e evidence record and
         // stays unverified with the degraded retention hint.
         assert(
@@ -1159,7 +1186,8 @@ function deepEqualExcept<Actual, Expected>(
       } else {
         assert(false, `unhandled OpenCode Go API: ${model.api}/${model.id}`);
       }
-      const expectedPath = model.api === "anthropic-messages" ? "/zen/go" : "/zen/go/v1";
+      const prefix = new URL(model.baseUrl).pathname.startsWith("/inference/") ? "/inference/go" : "/zen/go";
+      const expectedPath = model.api === "anthropic-messages" ? prefix : `${prefix}/v1`;
       assert(
         model.baseUrl === `https://opencode.ai${expectedPath}`,
         `opencode-go ${model.id} should register the exact ${expectedPath} baseUrl`,
