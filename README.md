@@ -48,6 +48,9 @@ provider-legal output controls. Supported direct OpenAI Responses models use
 no-output prewarming; most other routes use a tiny output limit. The Codex
 endpoint rejects output-limit fields, so exact Codex replay is deliberately
 uncapped and protected by an oversized-output guard.
+Probes reuse Pi's request-header chain from that turn, so headers that extensions
+add in `before_provider_headers` (for example a proxy's session ID) are sent with
+the probe too. Header values are rebuilt at probe time, never stored.
 Native API replay does not rebuild the conversation. The optional Claude Code
 bridge adapter instead refreshes a shared prefix in an isolated, unsaved SDK fork.
 It does not change your real turns.

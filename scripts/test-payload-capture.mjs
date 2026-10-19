@@ -31,6 +31,15 @@ await Promise.all(["priority", "default"].map(service_tier => runtime.streamSimp
   onPayload: async payload => { capture.observe(ctx); await new Promise(resolve => setImmediate(resolve)); return { ...payload, service_tier }; },
 })));
 assert.deepEqual(captured.slice(2).map(p => p.service_tier).sort(), ["default", "priority"]);
+let capturedTransform;
+const headerCapture = new FinalPayloadCapture((_payload, _ctx, transformHeaders) => { capturedTransform = transformHeaders; });
+const transformHeaders = headers => ({ ...headers, "x-extension": "1" });
+runtime.streamSimple = original;
+assert(headerCapture.install(ctx));
+await runtime.streamSimple(model, {}, { transformHeaders, onPayload: payload => { headerCapture.observe(ctx); return payload; } });
+assert.equal(capturedTransform, transformHeaders, "capture must hand over Pi's header chain for probe replay");
+headerCapture.dispose();
+assert(capture.install(ctx));
 const laterWrapper = (...args) => wrapped(...args);
 runtime.streamSimple = laterWrapper;
 capture.dispose();
