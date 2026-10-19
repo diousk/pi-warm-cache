@@ -8,7 +8,7 @@ The next turn then pays a cold read or a costly rewrite.
 This extension sends a small keepalive probe before that is likely to happen.
 
 The minimum supported [Pi](https://github.com/earendil-works/pi) version is 0.85.1.
-CI runs tests, type checks, and lint against 0.85.1, 0.86.0, 0.86.1, 0.87.1, 0.99.1, 0.99.2, and the latest
+CI runs tests, type checks, and lint against the supported versions listed in the workflow and the latest
 stable release on each push to main and pull request. The latest job resolves one
 version for all three Pi packages. Development dependencies remain pinned to
 0.85.1; newer Pi-only APIs are isolated behind a compatibility layer. Future
@@ -146,6 +146,13 @@ This no-output mechanism is restricted to `openai` / `openai-responses` at
 subscription endpoint retain their existing replay policies; the OpenAI API's
 prewarm field is not assumed to work there.
 
+If OpenAI returns a parameter-rejection HTTP 400 for a probe's newly added
+`prompt_cache_options`, the extension retries once with a small output cap and
+uses the older implicit-cache cadence for that model/endpoint until reload.
+The downgrade survives new real turns and model switches, but does not affect
+other routes or change Pi's model metadata. Existing cache options captured
+from real requests are never stripped, and unrelated API errors are not retried.
+
 Sources: [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
 and [GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol).
 The Pi 0.99.1 host test verifies the catalog prices and real Responses adapter
@@ -200,6 +207,8 @@ The 4-minute cadence is not a provider TTL promise.
 If probes keep returning no cache read, warming stops until the next real turn.
 
 OpenCode Go must use the registered endpoints: Anthropic at `https://opencode.ai/zen/go`, and OpenAI-style APIs at `https://opencode.ai/zen/go/v1`.
+Pi's newer `https://opencode.ai/inference/go` and `/inference/go/v1` endpoints support explicit manual probes on the same three transports. They remain unverified: automatic warming stays off and savings are not claimed until cache evidence is recorded for those endpoints. The Google transport is unsupported.
+Azure Responses recognizes both the current `azure` provider and its older `azure-openai-responses` name.
 
 ### Claude Code via `pi-claude-bridge`
 

@@ -190,7 +190,7 @@ export function isOpenAIModel(model: Model<any> | undefined): boolean {
     (model.provider === "openai" &&
       (model.api === "openai-responses" || model.api === "openai-completions")) ||
     (model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-    (model.provider === "azure-openai-responses" && model.api === "azure-openai-responses") ||
+    (["azure", "azure-openai-responses"].includes(model.provider) && model.api === "azure-openai-responses") ||
     (model.provider === "github-copilot" &&
       (model.api === "openai-responses" || model.api === "openai-completions"))
   );
@@ -784,7 +784,9 @@ export function applyWarmOutputLimit<Payload>(
   const body = payloadObject(payload);
   if (!body) return payload;
 
-  const codex = api === "openai-codex-responses" || isCodexPayload(body);
+  // Direct Responses can share Codex's body shape. An explicit API wins;
+  // only infer Codex from the payload when the caller has no route metadata.
+  const codex = api === "openai-codex-responses" || (!api && isCodexPayload(body));
   if (codex) {
     // Codex rejects hard output caps. Strip if a caller injected them.
     delete body.max_output_tokens;
@@ -859,6 +861,14 @@ export function applyWarmProbePayload<Payload>(
     return payload;
   }
   return applyWarmOutputLimit(payload, maxOutputTokens, model.api, getModelCompat(model));
+}
+
+/** Only a parameter-rejection 400 permits retrying an injected prewarm field. */
+export function isUnsupportedPromptCacheOptionsError(message: string): boolean {
+  return /\b400\b/.test(message) && (
+    /prompt_cache_options["']?\s+(?:is\s+)?(?:not supported|unsupported|not allowed)/i.test(message) ||
+    /(?:unsupported|unknown|unrecognized) parameter:\s*["']?prompt_cache_options["']?(?:\s|[,.:]|$)/i.test(message)
+  );
 }
 
 /**

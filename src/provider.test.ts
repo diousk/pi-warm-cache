@@ -9,6 +9,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import "./advisor.test.ts";
 import { tmpdir } from "node:os";
+import { mock } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +33,7 @@ import {
   isBestEffortNoWriteFamily,
   isCodexPayload,
   isPayloadContinuation,
+  isUnsupportedPromptCacheOptionsError,
   minimumOutputTokensForPayload,
   modelSupportsLongCacheRetention,
   opencodeGoForeignInstrumentationReason,
@@ -397,6 +399,111 @@ function deepEqualExcept<Actual, Expected>(
       "a successful no-output prewarm must count as a hit");
     assert(result.costUsd === 0.0002, "Sol's 5% cache-read price must be preserved");
   } finally { warmer.dispose(); }
+}
+
+// Catalog prewarm support can disagree with the actual OpenAI model/endpoint.
+{
+  const rejection = 'OpenAI API error (400): {"message":"prompt_cache_options is not supported on this model","type":"invalid_request_error","param":"prompt_cache_options","code":"invalid_parameter"}';
+  assert(isUnsupportedPromptCacheOptionsError(rejection), "recognize the reported API rejection");
+  assert(isUnsupportedPromptCacheOptionsError("OpenAI API error (400): Unsupported parameter: 'prompt_cache_options'"),
+    "recognize unsupported-parameter wording");
+  for (const error of ["OpenAI API error (401): prompt_cache_options is not supported",
+    "OpenAI API error (400): max_output_tokens is not supported on this model",
+    "OpenAI API error (400): invalid prompt_cache_options ttl", "network timeout"]) {
+    assert(!isUnsupportedPromptCacheOptionsError(error), "unrelated errors must not authorize retries");
+  }
+  const selected = modelFixture({
+    id: "gpt-6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1",
+    compat: { supportsExplicitPromptCacheMode: true },
+    cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+  });
+  // This direct Responses shape also resembles Codex; the API must determine caps.
+  const original = {
+    model: selected.id, instructions: "unchanged prefix", store: false,
+    input: [{ role: "user", content: [{ type: "input_text", text: "hi" }] }],
+    prompt_cache_key: "fallback-session", reasoning: { effort: "low" },
+    tools: [{ type: "function", name: "read", parameters: { type: "object" } }],
+  };
+  for (const thrown of [false, true]) {
+    const replays: NonNullable<ReturnType<typeof payloadObject>>[] = [];
+    const ctx = contextFixture({
+      cwd: process.cwd(), model: selected, hasUI: false, isIdle: () => true,
+      sessionManager: { getSessionId: () => "fallback-session" },
+    });
+    const complete = completeFixture(async (model: Model<any>, _context: WarmCompleteContext,
+      options?: ProbeRequestOptions) => {
+      const replay = payloadObject(options?.onPayload?.({}, model));
+      assert(replay, "probe must have a replay payload");
+      replays.push(replay);
+      if (replays.length === 1) {
+        if (thrown) throw new Error(rejection);
+        return { stopReason: "error", errorMessage: rejection };
+      }
+      return { stopReason: "stop", usage: { input: 0, output: 1, cacheRead: 2000, cacheWrite: 0, cost: { total: 0.0002 } } };
+    });
+    const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "low" }), complete);
+    try {
+      warmer.bindContext(ctx);
+      warmer.setConfig({ ...DEFAULT_CONFIG, intervalMs: null });
+      warmer.capturePayload(original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      const result = thrown ? await runTimerWarm(warmer) : await warmer.warmNow(ctx);
+      assert(result.ok && result.cacheHit && replays.length === 2, "manual and timer probes retry returned and thrown 400s once successfully");
+      assert(payloadObject(replays[0]?.prompt_cache_options)?.prewarm === true, "first probe tries catalog prewarming");
+      assert(!("prompt_cache_options" in replays[1]!), "fallback must omit the injected field");
+      assert(replays[1]?.max_output_tokens === 16, "fallback must be capped even for Codex-like direct Responses");
+      deepEqualExcept(original, replays[1], WARM_MUTABLE_PAYLOAD_KEYS);
+      assert(!("prompt_cache_options" in original) && getModelCompat(selected)?.supportsExplicitPromptCacheMode === true,
+        "neither real payload nor host model metadata may be mutated");
+      assert(warmer.getStatusText().includes("strategy=openai-implicit"), "fallback must downgrade its advertised TTL/cadence");
+      await warmer.warmNow(ctx);
+      assert(Number(replays.length) === 3 && !("prompt_cache_options" in replays[2]!), "later probes remember the rejection");
+      warmer.capturePayload(original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(ctx);
+      assert(!("prompt_cache_options" in replays[3]!), "reanchoring must preserve the route downgrade");
+      const other = contextFixture({ ...ctx, model: modelFixture({ ...selected, id: "gpt-6.1-sol" }) });
+      warmer.onModelChange(other);
+      warmer.capturePayload({ ...original, model: "gpt-6.1-sol" }, other);
+      warmer.noteAssistantUsage(other, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(other);
+      assert(payloadObject(replays[4]?.prompt_cache_options)?.prewarm === true, "a different model retains prewarming");
+      const endpoint = contextFixture({ ...ctx, model: modelFixture({ ...selected, baseUrl: "https://api.openai.com" }) });
+      warmer.onModelChange(endpoint);
+      warmer.capturePayload(original, endpoint);
+      warmer.noteAssistantUsage(endpoint, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      await warmer.warmNow(endpoint);
+      assert(payloadObject(replays[5]?.prompt_cache_options)?.prewarm === true, "a different endpoint retains its own capability");
+    } finally { warmer.dispose(); }
+  }
+
+  for (const scenario of ["unrelated", "captured-options", "retry-fails", "superseded"] as const) {
+    let calls = 0;
+    const ctx = contextFixture({
+      cwd: process.cwd(), model: selected, hasUI: false, isIdle: () => true,
+      sessionManager: { getSessionId: () => "fallback-session" },
+    });
+    const complete = completeFixture(async (model: Model<any>, _context: WarmCompleteContext,
+      options?: ProbeRequestOptions) => {
+      options?.onPayload?.({}, model);
+      calls += 1;
+      if (scenario === "superseded") warmer.onModelChange(ctx);
+      return { stopReason: "error", errorMessage: scenario === "unrelated"
+        ? "OpenAI API error (400): max_output_tokens is not supported on this model" : rejection };
+    });
+    const warmer = new SessionWarmer(extensionApiFixture({ getThinkingLevel: () => "low" }), complete);
+    try {
+      warmer.bindContext(ctx);
+      warmer.setConfig(DEFAULT_CONFIG);
+      warmer.capturePayload(scenario === "captured-options"
+        ? { ...original, prompt_cache_options: { ttl: "30m" } } : original, ctx);
+      warmer.noteAssistantUsage(ctx, { input: 0, output: 2, cacheRead: 2000, cacheWrite: 0 });
+      const result = await warmer.warmNow(ctx);
+      assert(!result.ok && calls === (scenario === "retry-fails" ? 2 : 1),
+        "never retry unrelated errors, captured cache settings, superseded probes, or a failed fallback");
+      assert(warmer.getActiveWarmSessions() === 0, "fallback must release the concurrency slot");
+    } finally { warmer.dispose(); }
+  }
 }
 
 // 2a) xAI Responses: cap only the legal output field and preserve cache identity.
@@ -967,6 +1074,26 @@ function deepEqualExcept<Actual, Expected>(
     "OpenRouter routes with missing metadata must not enable manualProbe",
   );
 
+  for (const provider of ["azure", "azure-openai-responses"]) {
+    const azure = modelFixture({ provider, api: "azure-openai-responses", id: "gpt-6.1-sol" });
+    assert(resolveProviderCapability(azure).state === "verified", `${provider} must recognize Azure Responses`);
+    assert(resolveStrategy(azure, DEFAULT_CONFIG).family !== "unsupported", `${provider} must select its Responses strategy`);
+  }
+  for (const [api, suffix] of [["anthropic-messages", ""], ["openai-completions", "/v1"], ["openai-responses", "/v1"]]) {
+    const model = modelFixture({ provider: "opencode-go", api, baseUrl: `https://opencode.ai/inference/go${suffix}` });
+    for (const slash of ["", "/"]) {
+      const capability = resolveProviderCapability(modelFixture({ ...model, baseUrl: `${model.baseUrl}${slash}` }));
+      assert(capability.state === "unverified" && capability.manualProbe && !capability.automaticWarm, `${api} inference path must permit only explicit probes`);
+    }
+    for (const baseUrl of ["https://proxy.example/inference/go", `${model.baseUrl}/extra`, "http://opencode.ai/inference/go"]) {
+      assert(resolveProviderCapability(modelFixture({ ...model, baseUrl })).state === "unsupported", `${api} must reject an unregistered inference endpoint`);
+    }
+    if (api === "openai-completions") {
+      const capability = resolveProviderCapability(model, { messages: [], cache_control: { type: "ephemeral" } });
+      assert(!capability.manualProbe && !capability.automaticWarm, "new paths must retain the foreign-marker refusal");
+    }
+  }
+
   // OpenCode Go: per-api proxy route registry with exact baseUrl paths.
   {
     // Exercise every installed catalog route without pinning a moving model count.
@@ -997,7 +1124,14 @@ function deepEqualExcept<Actual, Expected>(
     for (const model of goModels) {
       goApiCounts[model.api] = (goApiCounts[model.api] ?? 0) + 1;
       const capability = resolveProviderCapability(model);
-      if (model.api === "anthropic-messages") {
+      if (model.api === "google-generative-ai") {
+        assert(capability.state === "unsupported", "unregistered Google transport must stay unsupported");
+        assert(!capability.automaticWarm && !capability.manualProbe, "Google transport must not probe");
+      } else if (new URL(model.baseUrl).pathname.startsWith("/inference/")) {
+        assert(capability.state === "unverified", "new inference endpoints need their own cache evidence");
+        assert(!capability.automaticWarm && capability.manualProbe, "new official paths support manual probes only");
+        assert(capability.reason.includes("savings are n/a"), "new endpoint must not claim savings");
+      } else if (model.api === "anthropic-messages") {
         // (anthropic-messages, plain-fallback) has no e2e evidence record and
         // stays unverified with the degraded retention hint.
         assert(
@@ -1053,7 +1187,8 @@ function deepEqualExcept<Actual, Expected>(
       } else {
         assert(false, `unhandled OpenCode Go API: ${model.api}/${model.id}`);
       }
-      const expectedPath = model.api === "anthropic-messages" ? "/zen/go" : "/zen/go/v1";
+      const prefix = new URL(model.baseUrl).pathname.startsWith("/inference/") ? "/inference/go" : "/zen/go";
+      const expectedPath = model.api === "anthropic-messages" ? prefix : `${prefix}/v1`;
       assert(
         model.baseUrl === `https://opencode.ai${expectedPath}`,
         `opencode-go ${model.id} should register the exact ${expectedPath} baseUrl`,
@@ -5989,6 +6124,8 @@ for (const tool of [
   let widget: string[] | undefined;
   let status = "";
   let idle = true;
+  const clockStart = Date.now();
+  mock.timers.enable({ apis: ["Date"], now: clockStart });
   const ctx = contextFixture({
     hasUI: true, cwd: process.cwd(), isIdle: () => idle,
     model: modelFixture({ id: "gpt-5.6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" }),
@@ -6034,7 +6171,9 @@ for (const tool of [
     warmer.setConfig({ ...warmer.getConfig(), warmDuringTools: ["gradle"] });
     assert(widget?.some((line) => line.includes("Next refresh in")), "enabling Gradle must reclassify a running tool without restarting it");
     const dueBeforeToggle = nextDueAtMs(warmer.getStatusText());
+    mock.timers.setTime(clockStart + 10_000);
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: true });
+    mock.timers.setTime(clockStart + 20_000);
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: false });
     assert(widget?.some((line) => line.includes("Next refresh in")), "switching all back to Gradle must keep a matching tool eligible");
     assert(nextDueAtMs(warmer.getStatusText()) === dueBeforeToggle, "policy toggles must preserve tool start and refresh deadline");
@@ -6049,6 +6188,7 @@ for (const tool of [
     assert(widget === undefined && status === "", "hidden widget must stay hidden without footer fallback");
   } finally {
     warmer.dispose();
+    mock.timers.reset();
   }
 }
 

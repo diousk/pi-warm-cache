@@ -15,6 +15,7 @@ import {
   getPromptCacheKeyFingerprint,
   isBestEffortNoWriteFamily,
   isPayloadContinuation,
+  isUnsupportedPromptCacheOptionsError,
   isSafeReplayPayload,
   payloadObject,
   isSafeXaiReplayPayload,
@@ -269,6 +270,8 @@ export class SessionWarmer {
   private realTurnBoundaryReason = "first real turn";
   private realTurnContinuity = false;
   private plan: StrategyResolution | null = null;
+  /** API rejections override catalog prewarm support, scoped to the exact route. */
+  private readonly rejectedPrewarmRoutes = new Set<string>();
   private lastLongTtlWarning: string | null = null;
   private logFile: string | null = null;
   private diagnostics = new CacheDiagnostics(entry => this.log(entry));
@@ -406,8 +409,18 @@ export class SessionWarmer {
     return this.transport(model)?.capability(payload) ?? resolveProviderCapability(model, payload);
   }
 
+  private prewarmRouteKey(model: NonNullable<ExtensionContext["model"]>): string {
+    return JSON.stringify([model.provider, model.api, model.baseUrl, model.id]);
+  }
+
+  private probeModel(model: NonNullable<ExtensionContext["model"]>): NonNullable<ExtensionContext["model"]> {
+    if (!this.rejectedPrewarmRoutes.has(this.prewarmRouteKey(model))) return model;
+    // Clone metadata only for probes; never modify Pi's model or real requests.
+    return { ...model, compat: { ...model.compat, supportsExplicitPromptCacheMode: false } };
+  }
+
   private resolvePlan<Payload>(model: NonNullable<ExtensionContext["model"]>, payload: Payload): StrategyResolution {
-    return this.transport(model)?.strategy(this.config) ?? resolveStrategy(model, this.config, payload);
+    return this.transport(model)?.strategy(this.config) ?? resolveStrategy(this.probeModel(model), this.config, payload);
   }
 
   /**
@@ -1904,7 +1917,7 @@ export class SessionWarmer {
     const ctx = this.ctx;
     const anchor = this.anchor;
     const payload = this.lastPayload;
-    const plan = this.plan;
+    let plan = this.plan;
     const capability = this.currentCapability(ctx);
 
     if (!isWarmModelAllowed(this.config.warmModels, ctx?.model)) {
@@ -2306,62 +2319,96 @@ export class SessionWarmer {
     this.log(warmStartLog);
 
     let probeRequestStartedAt = Date.now();
+    let addedPrewarm = false;
     try {
-      const response = this.transport(model)
-        ? await this.transport(model)!.complete(payload, this.config, probeAbort.signal)
-        : await resolveCompleteRequest(ctx, this.completeRequest)(
-        model,
-        {
-          systemPrompt: "cache-warm",
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: this.config.warmSuffix }],
-              timestamp: Date.now(),
-            },
-          ],
-        },
-        {
-          signal: this.abort.signal,
-          maxTokens: this.config.maxOutputTokens,
-          cacheRetention: plan.cacheRetention,
-          sessionId: anchor.sessionId,
-          onPayload: () => {
-            if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
-              throw new Error("probe superseded");
-            }
-            // 1) Clone last real payload (exact tools/system/history prefix).
-            // 2) Codex suffix mode only: append a constrained warm user turn so
-            //    the model is not asked to continue the agent trajectory (no
-            //    output cap). Exact mode preserves the captured endpoint.
-            //    Do NOT append on Anthropic: max_tokens already yields out≈1, and
-            //    a second consecutive user role can 400 (roles must alternate).
-            // 3) Direct OpenAI GPT-5.6+ uses no-output prewarming; other
-            //    routes keep their existing API-legal output controls.
-            // Note: complete()'s dummy warmSuffix message is discarded here; the
-            // body that wins is this onPayload result (by design).
-            const cloned = structuredClone(payload);
-            const codex = model.api === "openai-codex-responses";
-            const xaiBestEffort = anchor.cacheFamily === "xai-best-effort";
-            const warmPayload = codex && codexReplayMode === "suffix"
-              ? appendWarmUserTurn(cloned, this.config.warmSuffix, model.api)
-              : cloned;
-            probeRequestStartedAt = Date.now();
-            return xaiBestEffort
-              ? applyXaiWarmOutputLimit(warmPayload, this.config.maxOutputTokens)
-              : applyWarmProbePayload(warmPayload, this.config.maxOutputTokens, model);
+      const sendProbe = async (cacheRetention: StrategyResolution["cacheRetention"]) => {
+        const response = this.transport(model)
+          ? await this.transport(model)!.complete(payload, this.config, probeAbort.signal)
+          : await resolveCompleteRequest(ctx, this.completeRequest)(
+          model,
+          {
+            systemPrompt: "cache-warm",
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: this.config.warmSuffix }],
+                timestamp: Date.now(),
+              },
+            ],
           },
-        },
-      );
+          {
+            signal: probeAbort.signal,
+            maxTokens: this.config.maxOutputTokens,
+            cacheRetention,
+            sessionId: anchor.sessionId,
+            onPayload: () => {
+              if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
+                throw new Error("probe superseded");
+              }
+              // 1) Clone last real payload (exact tools/system/history prefix).
+              // 2) Codex suffix mode only: append a constrained warm user turn so
+              //    the model is not asked to continue the agent trajectory (no
+              //    output cap). Exact mode preserves the captured endpoint.
+              //    Do NOT append on Anthropic: max_tokens already yields out≈1, and
+              //    a second consecutive user role can 400 (roles must alternate).
+              // 3) Direct OpenAI GPT-5.6+ uses no-output prewarming; other
+              //    routes keep their existing API-legal output controls.
+              // Note: complete()'s dummy warmSuffix message is discarded here; the
+              // body that wins is this onPayload result (by design).
+              const cloned = structuredClone(payload);
+              const codex = model.api === "openai-codex-responses";
+              const xaiBestEffort = anchor.cacheFamily === "xai-best-effort";
+              const warmPayload = codex && codexReplayMode === "suffix"
+                ? appendWarmUserTurn(cloned, this.config.warmSuffix, model.api)
+                : cloned;
+              probeRequestStartedAt = Date.now();
+              const replay = xaiBestEffort
+                ? applyXaiWarmOutputLimit(warmPayload, this.config.maxOutputTokens)
+                : applyWarmProbePayload(warmPayload, this.config.maxOutputTokens, this.probeModel(model));
+              addedPrewarm = payloadObject(payloadObject(replay)?.prompt_cache_options)?.prewarm === true &&
+                !("prompt_cache_options" in (payloadObject(payload) ?? {}));
+              return replay;
+            },
+          },
+        );
 
+        if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
+          throw new Error("probe superseded");
+        }
+        if (response.stopReason === "aborted") {
+          throw new Error("aborted");
+        }
+        if (response.stopReason === "error") {
+          throw new Error(response.errorMessage || "provider error");
+        }
+        return response;
+      };
+
+      let response;
+      try {
+        response = await sendProbe(plan.cacheRetention);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision ||
+            !addedPrewarm || !isUnsupportedPromptCacheOptionsError(message)) throw error;
+        this.rejectedPrewarmRoutes.add(this.prewarmRouteKey(model));
+        plan = this.resolvePlan(model, payload);
+        this.plan = plan;
+        anchor.cacheFamily = plan.family;
+        this.log({
+          event: "prewarm_fallback",
+          source: "warm_probe",
+          provider: model.provider,
+          modelId: model.id,
+          api: model.api,
+          family: plan.family,
+          reason: "API rejected injected prompt_cache_options; retrying capped replay",
+        });
+        // One retry only, using the same signal, revision and concurrency slot.
+        response = await sendProbe(plan.cacheRetention);
+      }
       if (probeAbort.signal.aborted || probeRevision !== this.anchorRevision) {
         return buildWarmResult({ fingerprint, error: "probe superseded", anchor });
-      }
-      if (response.stopReason === "aborted") {
-        throw new Error("aborted");
-      }
-      if (response.stopReason === "error") {
-        throw new Error(response.errorMessage || "provider error");
       }
 
       const result = buildWarmResult({
