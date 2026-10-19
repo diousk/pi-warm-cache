@@ -9,6 +9,7 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import "./advisor.test.ts";
 import { tmpdir } from "node:os";
+import { mock } from "node:test";
 import type { Model } from "@earendil-works/pi-ai";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6123,6 +6124,8 @@ for (const tool of [
   let widget: string[] | undefined;
   let status = "";
   let idle = true;
+  const clockStart = Date.now();
+  mock.timers.enable({ apis: ["Date"], now: clockStart });
   const ctx = contextFixture({
     hasUI: true, cwd: process.cwd(), isIdle: () => idle,
     model: modelFixture({ id: "gpt-5.6", provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" }),
@@ -6168,7 +6171,9 @@ for (const tool of [
     warmer.setConfig({ ...warmer.getConfig(), warmDuringTools: ["gradle"] });
     assert(widget?.some((line) => line.includes("Next refresh in")), "enabling Gradle must reclassify a running tool without restarting it");
     const dueBeforeToggle = nextDueAtMs(warmer.getStatusText());
+    mock.timers.setTime(clockStart + 10_000);
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: true });
+    mock.timers.setTime(clockStart + 20_000);
     warmer.setConfig({ ...warmer.getConfig(), warmAllTools: false });
     assert(widget?.some((line) => line.includes("Next refresh in")), "switching all back to Gradle must keep a matching tool eligible");
     assert(nextDueAtMs(warmer.getStatusText()) === dueBeforeToggle, "policy toggles must preserve tool start and refresh deadline");
@@ -6183,6 +6188,7 @@ for (const tool of [
     assert(widget === undefined && status === "", "hidden widget must stay hidden without footer fallback");
   } finally {
     warmer.dispose();
+    mock.timers.reset();
   }
 }
 
